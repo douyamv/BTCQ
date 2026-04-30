@@ -4,5 +4,9 @@ eth-keys>=0.4.0
 qiskit>=2.0
 qiskit-ibm-runtime>=0.35
 
+# P2P 节点
+flask>=3.0
+requests>=2.32
+
 # 可选：GPU 加速验证（v1.0 推荐）
 # qiskit-aer-gpu

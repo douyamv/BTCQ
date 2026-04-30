@@ -1,4 +1,10 @@
-"""区块验证器。任何节点都可独立运行验证一条链是否合法。"""
+"""区块验证器。任何节点都可独立运行验证一条链是否合法。
+
+v0.1.1 修复：
+* Bug 1：强制 VRF 选举的出块人才有效
+* Bug 2：交易按 kind 分支校验（transfer/stake/unstake 各自余额逻辑）
+* Bug 7：bootstrap 期单地址出块上限
+"""
 
 from __future__ import annotations
 import time
@@ -11,9 +17,11 @@ from .circuit import build_circuit_description, simulate_statevector, amplitudes
 from .xeb import linear_xeb, linear_xeb_from_probs
 from .wallet import Wallet, keccak256
 from .transaction import Transaction
+from .stake import STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE, select_proposer
 from .constants import (
     PROTOCOL_VERSION, CIRCUIT_N_QUBITS, CIRCUIT_DEPTH,
     XEB_FLOAT_TOL, TIMESTAMP_FUTURE_TOL,
+    BOOTSTRAP_OPEN_BLOCKS, BOOTSTRAP_PER_ADDR_CAP, MIN_STAKE,
 )
 
 
@@ -22,34 +30,60 @@ class VerificationError(Exception):
 
 
 def _verify_transactions(txs, chain_state) -> Tuple[bool, str]:
-    """对一组交易做：签名 + nonce 顺序 + 余额够 三项校验。chain_state 是当前已上链状态（不含本块）。"""
+    """按 kind 分支校验交易：transfer / stake / unstake 各自语义。
+
+    chain_state: 当前已上链状态（不含本块）。
+    """
     if not txs:
         return True, ""
-    pending_balance = {}
-    pending_nonce = {}
+    pending_balance: dict = {}
+    pending_nonce: dict = {}
+    pending_stake: dict = {}
+
+    def _bal(a):    return pending_balance.get(a, chain_state.balance_of(a))
+    def _nonce(a):  return pending_nonce.get(a, chain_state.nonce_of(a))
+    def _stake(a):  return pending_stake.get(a, chain_state.staked_of(a))
+
     for i, tx in enumerate(txs):
         if not tx.verify_signature():
             return False, f"交易 #{i} 签名无效"
-        cur_nonce = pending_nonce.get(tx.sender, chain_state.nonce_of(tx.sender))
-        if tx.nonce != cur_nonce:
-            return False, f"交易 #{i} nonce 错误: {tx.nonce} != {cur_nonce}"
-        cur_bal = pending_balance.get(tx.sender, chain_state.balance_of(tx.sender))
-        if cur_bal < tx.amount:
-            return False, f"交易 #{i} 余额不足: {cur_bal} < {tx.amount}"
+        if _nonce(tx.sender) != tx.nonce:
+            return False, f"交易 #{i} nonce 错误: {tx.nonce} != {_nonce(tx.sender)}"
         if tx.amount < 0:
             return False, f"交易 #{i} 金额为负"
-        pending_balance[tx.sender] = cur_bal - tx.amount
-        pending_balance[tx.recipient] = pending_balance.get(
-            tx.recipient, chain_state.balance_of(tx.recipient)) + tx.amount
-        pending_nonce[tx.sender] = cur_nonce + 1
+
+        if tx.kind == TX_TRANSFER:
+            if _bal(tx.sender) < tx.amount:
+                return False, f"交易 #{i} (transfer) 余额不足: {_bal(tx.sender)} < {tx.amount}"
+            pending_balance[tx.sender] = _bal(tx.sender) - tx.amount
+            pending_balance[tx.recipient] = _bal(tx.recipient) + tx.amount
+        elif tx.kind == TX_STAKE:
+            if tx.recipient != STAKE_VAULT:
+                return False, f"交易 #{i} (stake) recipient 必须是 STAKE_VAULT"
+            if _bal(tx.sender) < tx.amount:
+                return False, f"交易 #{i} (stake) 流动余额不足: {_bal(tx.sender)} < {tx.amount}"
+            pending_balance[tx.sender] = _bal(tx.sender) - tx.amount
+            pending_stake[tx.sender] = _stake(tx.sender) + tx.amount
+        elif tx.kind == TX_UNSTAKE:
+            if tx.recipient != STAKE_VAULT:
+                return False, f"交易 #{i} (unstake) recipient 必须是 STAKE_VAULT"
+            if _stake(tx.sender) < tx.amount:
+                return False, f"交易 #{i} (unstake) 抵押不足: {_stake(tx.sender)} < {tx.amount}"
+            pending_stake[tx.sender] = _stake(tx.sender) - tx.amount
+            # 余额不立即增加（冷却期）
+        else:
+            return False, f"交易 #{i} 未知 kind: {tx.kind}"
+
+        pending_nonce[tx.sender] = tx.nonce + 1
     return True, ""
 
 
 def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
-                 chain_state: Optional["Chain"] = None, recompute_xeb: bool = True) -> Tuple[bool, str]:
+                 chain_state: Optional["Chain"] = None,
+                 recompute_xeb: bool = True) -> Tuple[bool, str]:
     """验证单个区块。返回 (是否合法, 信息)。
 
-    chain_state: 若提供则会验证交易余额/nonce 与链状态一致。
+    chain_state: 已上链状态（不含本块）。强烈建议提供，否则跳过共识层校验。
     """
     # 1. 协议版本
     if block.version != PROTOCOL_VERSION:
@@ -81,7 +115,7 @@ def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
     # 7b. transactions_root
     if compute_transactions_root(block.transactions) != block.transactions_root:
         return False, "transactions_root 错误"
-    # 7c. 每笔交易签名 + 余额 + nonce 校验
+    # 7c. 交易合法性（按 kind 分支校验）
     if chain_state is not None:
         ok, msg = _verify_transactions(block.transactions, chain_state)
         if not ok:
@@ -89,23 +123,33 @@ def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
     # 8. 出块人签名
     if not Wallet.verify(block.block_hash(), block.proposer_signature, block.proposer_address):
         return False, "出块人签名无效"
-    # 8b. 出块人是否有足够抵押（PoQ-Stake 关键约束）
-    # bootstrap 期（前 BOOTSTRAP_OPEN_BLOCKS 块）开放挖矿，无需抵押
-    from .constants import BOOTSTRAP_OPEN_BLOCKS, MIN_STAKE
-    if chain_state is not None and block.height > BOOTSTRAP_OPEN_BLOCKS:
-        from .stake import stake_state_at
-        prior_blocks = [chain_state.get(h) for h in range(0, block.height)]
-        stake_map = stake_state_at(prior_blocks)
-        if stake_map.get(block.proposer_address, 0) < MIN_STAKE:
-            return False, f"出块人 {block.proposer_address.hex()} 抵押不足，无资格出块"
+
+    # 8b. 共识层资格检查（PoQ-Stake 核心）
+    if chain_state is not None:
+        if block.height <= BOOTSTRAP_OPEN_BLOCKS:
+            # bootstrap 期：开放挖矿，但单地址有上限
+            mined_so_far = chain_state.bootstrap_blocks_by(block.proposer_address)
+            if mined_so_far >= BOOTSTRAP_PER_ADDR_CAP:
+                return False, (f"bootstrap 期 {block.proposer_address.hex()} 已挖 "
+                               f"{mined_so_far} 块，达到 {BOOTSTRAP_PER_ADDR_CAP} 上限")
+        else:
+            # PoQ-Stake 期：必须是 VRF 选中的出块人
+            stake_map = chain_state.stake_map()
+            if stake_map.get(block.proposer_address, 0) < MIN_STAKE:
+                return False, f"出块人 {block.proposer_address.hex()} 抵押不足"
+            expected = select_proposer(block.prev_hash, block.height, stake_map)
+            if expected is None:
+                return False, "全网无合格 staker，链卡死"
+            if block.proposer_address != expected:
+                return False, (f"非本 slot 选中的出块人：期望 0x{expected.hex()}，"
+                               f"实际 0x{block.proposer_address.hex()}")
+
     # 9. 重算电路 + XEB（最贵的一步，可选）
     if recompute_xeb:
-        # PoQ-Stake：seed 由 prev_hash + height + proposer 决定（不再有矿工 nonce）
         seed = keccak256(block.prev_hash + block.height.to_bytes(8, "big") + block.proposer_address)
         desc = build_circuit_description(seed, block.n_qubits, block.depth)
         probs = amplitudes_for_samples(desc, block.samples)
         f_xeb = linear_xeb_from_probs(probs, block.n_qubits)
-        # n>31 用 MPS 近似时容许较大数值漂移
         tol = 0.02 if block.n_qubits > 31 else XEB_FLOAT_TOL * 100
         if abs(f_xeb - block.xeb_score) > tol:
             return False, f"XEB 重算不一致: 链上 {block.xeb_score:.6f} vs 实测 {f_xeb:.6f}"
@@ -115,19 +159,18 @@ def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
 
 
 def verify_chain(chain_dir: str | Path, *, recompute_xeb: bool = True) -> Tuple[bool, str]:
-    """全链顺序验证。每一步用"截至 h-1 的子链"作为状态来校验交易。"""
+    """全链顺序验证。用"截至 h-1 的子链"作为状态来校验交易。"""
     full_chain = Chain(chain_dir)
     if full_chain.head is None:
         return False, "链为空"
     if full_chain.height < 0:
         return False, "无创世"
 
-    # 用一个"逐步追加"的影子链来代表每个高度时的状态
     import tempfile, shutil
     tmpdir = Path(tempfile.mkdtemp(prefix="btcq-verify-"))
     try:
         shadow = Chain(tmpdir)
-        shadow.append(full_chain.get(0))   # 复制创世
+        shadow.append(full_chain.get(0))
 
         for h in range(1, full_chain.height + 1):
             block = full_chain.get(h)

@@ -1,14 +1,23 @@
-"""链状态管理：从磁盘加载区块、追加、查询余额。"""
+"""链状态管理：从磁盘加载区块、追加、查询余额。
+
+设计要点（v0.1.1）：
+* **增量 stake_map 缓存**：append 时同步更新，查询 O(1)
+* **per-address bootstrap 计数**：限制单地址在 bootstrap 期最多挖几块
+* **slash_records**：罚没历史，可被 verifier 查询
+"""
 
 from __future__ import annotations
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 import json
 
 from .block import Block, block_reward
 from .constants import (
-    INITIAL_XEB_THRESHOLD, DIFFICULTY_MIN_FACTOR, DIFFICULTY_MAX_FACTOR,
+    DIFFICULTY_MIN_FACTOR, DIFFICULTY_MAX_FACTOR,
     DIFFICULTY_MIN, DIFFICULTY_MAX, GENESIS_TIMESTAMP,
+    INITIAL_XEB_THRESHOLD, POQSTAKE_XEB_THRESHOLD_FLOOR,
+    BOOTSTRAP_OPEN_BLOCKS, BOOTSTRAP_PER_ADDR_CAP,
+    UNSTAKE_DELAY_BLOCKS, SLASH_RATIO, COIN,
     target_block_time_at, difficulty_window_at,
 )
 
@@ -18,6 +27,15 @@ class Chain:
         self.dir = Path(data_dir)
         (self.dir / "blocks").mkdir(parents=True, exist_ok=True)
         self._blocks: List[Block] = []
+        # === 增量缓存 ===
+        # 抵押映射：address -> currently active stake (atomic)
+        self._stake_map: Dict[bytes, int] = {}
+        # 待释放冷却：[(release_height, address, amount)]
+        self._cooling: List[Tuple[int, bytes, int]] = []
+        # 每个地址的 bootstrap 期出块数（防垄断）
+        self._bootstrap_blocks_by_addr: Dict[bytes, int] = {}
+        # 罚没历史：[(height, address, amount, reason)]
+        self._slash_records: List[Tuple[int, bytes, int, str]] = []
         self._load()
 
     def _load(self):
@@ -27,7 +45,29 @@ class Chain:
             key=lambda p: int(p.stem),
         )
         for f in files:
-            self._blocks.append(Block.load(f))
+            block = Block.load(f)
+            self._blocks.append(block)
+            self._update_state_caches(block)
+
+    def _update_state_caches(self, block: Block):
+        """append/load 时增量更新所有状态缓存。O(交易数)。"""
+        # 1. 释放已到期的冷却
+        self._cooling = [(h, a, amt) for (h, a, amt) in self._cooling if h > block.height]
+        # 2. 处理交易对 stake_map 的影响
+        for tx in block.transactions:
+            if tx.kind == "stake":
+                self._stake_map[tx.sender] = self._stake_map.get(tx.sender, 0) + tx.amount
+            elif tx.kind == "unstake":
+                cur = self._stake_map.get(tx.sender, 0)
+                if tx.amount <= cur:
+                    self._stake_map[tx.sender] = cur - tx.amount
+                    if self._stake_map[tx.sender] == 0:
+                        del self._stake_map[tx.sender]
+                    self._cooling.append((block.height + UNSTAKE_DELAY_BLOCKS, tx.sender, tx.amount))
+        # 3. bootstrap 期 per-address 出块数
+        if block.height > 0 and block.height <= BOOTSTRAP_OPEN_BLOCKS:
+            self._bootstrap_blocks_by_addr[block.proposer_address] = \
+                self._bootstrap_blocks_by_addr.get(block.proposer_address, 0) + 1
 
     @property
     def height(self) -> int:
@@ -43,6 +83,7 @@ class Chain:
     def append(self, block: Block):
         assert block.height == self.height + 1, f"高度不连续 {block.height} vs {self.height + 1}"
         self._blocks.append(block)
+        self._update_state_caches(block)
         block.save(self.dir / "blocks" / f"{block.height:08d}.json")
         # 同步刷新 latest 软链快照
         (self.dir / "blocks" / "latest.json").write_text(
@@ -81,33 +122,43 @@ class Chain:
         return total
 
     def staked_of(self, address_bytes: bytes) -> int:
-        """当前活跃抵押额。"""
-        from .stake import stake_state_at
-        return stake_state_at(self._blocks).get(address_bytes, 0)
+        """O(1)：从增量缓存读取当前活跃抵押额。"""
+        return self._stake_map.get(address_bytes, 0)
 
     def cooling_of(self, address_bytes: bytes) -> int:
-        """正在冷却中（已申请解抵押但还没度过 UNSTAKE_DELAY_BLOCKS）的金额。"""
-        from .constants import UNSTAKE_DELAY_BLOCKS
-        total = 0
-        current_h = self.height
-        for b in self._blocks:
-            for tx in b.transactions:
-                if tx.kind == "unstake" and tx.sender == address_bytes:
-                    if b.height + UNSTAKE_DELAY_BLOCKS > current_h:
-                        total += tx.amount
-        return total
+        """O(冷却记录数)：未到期冷却金额。"""
+        return sum(amt for (h, a, amt) in self._cooling if a == address_bytes)
 
     def total_balance_of(self, address_bytes: bytes) -> int:
         """流动 + 抵押 + 冷却（用户的全部资产）。"""
         return self.balance_of(address_bytes) + self.staked_of(address_bytes) + self.cooling_of(address_bytes)
 
-    def stake_map(self) -> dict:
-        """全网当前抵押映射 {address: stake_amount}。"""
-        from .stake import stake_state_at
-        return stake_state_at(self._blocks)
+    def stake_map(self) -> Dict[bytes, int]:
+        """全网当前抵押映射 {address: stake_amount}。O(1) 直接返回缓存副本。"""
+        return dict(self._stake_map)
 
     def total_stake(self) -> int:
-        return sum(self.stake_map().values())
+        return sum(self._stake_map.values())
+
+    def bootstrap_blocks_by(self, address_bytes: bytes) -> int:
+        """该地址在 bootstrap 期已经挖了多少块。"""
+        return self._bootstrap_blocks_by_addr.get(address_bytes, 0)
+
+    def slash(self, address: bytes, height: int, reason: str) -> int:
+        """对违规出块人执行罚没。返回扣除的金额（atomic）。"""
+        cur = self._stake_map.get(address, 0)
+        if cur <= 0:
+            return 0
+        amount = max(int(0.001 * COIN), int(cur * SLASH_RATIO))   # 最少 0.001 BTCQ
+        amount = min(amount, cur)
+        self._stake_map[address] = cur - amount
+        if self._stake_map[address] == 0:
+            del self._stake_map[address]
+        self._slash_records.append((height, address, amount, reason))
+        return amount
+
+    def slash_records(self) -> list:
+        return list(self._slash_records)
 
     def nonce_of(self, address_bytes: bytes) -> int:
         n = 0

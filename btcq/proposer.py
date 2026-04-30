@@ -19,7 +19,7 @@ import numpy as np
 
 from .constants import (
     PROTOCOL_VERSION, CIRCUIT_N_QUBITS, CIRCUIT_DEPTH, CIRCUIT_N_SAMPLES,
-    MIN_STAKE, BOOTSTRAP_OPEN_BLOCKS,
+    MIN_STAKE, BOOTSTRAP_OPEN_BLOCKS, BOOTSTRAP_PER_ADDR_CAP,
 )
 from .circuit import build_circuit_description, to_qiskit, simulate_statevector, amplitudes_for_samples
 from .xeb import linear_xeb, linear_xeb_from_probs
@@ -28,7 +28,7 @@ from .chain import Chain
 from .wallet import Wallet, keccak256
 from .mempool import Mempool
 from .transaction import Transaction
-from .stake import STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE
+from .stake import STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE, select_proposer
 
 
 def _circuit_seed(prev_hash: bytes, height: int, proposer_addr: bytes) -> bytes:
@@ -53,20 +53,41 @@ def _samples_from_counts(counts: dict, n_qubits: int, n_samples: int) -> List[in
 
 
 def _check_eligible(chain: Chain, wallet: Wallet, verbose: bool):
-    """出块前检查：必须是合格 staker（创世后头 BOOTSTRAP_OPEN_BLOCKS 个块除外）。"""
+    """出块前检查共识资格。bootstrap 期 vs PoQ-Stake 期不同规则。"""
     next_height = chain.height + 1
+    addr = wallet.address_bytes
+
     if next_height <= BOOTSTRAP_OPEN_BLOCKS:
+        # bootstrap：开放挖矿，但单地址有出块上限（防垄断）
+        mined = chain.bootstrap_blocks_by(addr)
+        if mined >= BOOTSTRAP_PER_ADDR_CAP:
+            raise RuntimeError(
+                f"bootstrap 期：地址 {wallet.address_hex()} 已挖 {mined} 块，"
+                f"达到 {BOOTSTRAP_PER_ADDR_CAP} 上限。等正式 PoQ-Stake 期再出块（先抵押）。"
+            )
         if verbose:
-            print(f"[propose] 第 {next_height}/{BOOTSTRAP_OPEN_BLOCKS} 个 bootstrap 开放块——任何持有量子机的人都可出块（无需抵押）")
+            print(f"[propose] bootstrap 第 {next_height}/{BOOTSTRAP_OPEN_BLOCKS} 块（你已挖 {mined}/{BOOTSTRAP_PER_ADDR_CAP}）")
         return
-    s = chain.staked_of(wallet.address_bytes)
+
+    # PoQ-Stake 期：必须有抵押 + 是 VRF 选中的出块人
+    s = chain.staked_of(addr)
     if s < MIN_STAKE:
         raise RuntimeError(
-            f"地址 {wallet.address_hex()} 抵押 {s/10**8:.4f} BTCQ < 最低 {MIN_STAKE/10**8:.4f} BTCQ，"
-            f"无资格出块。先用 scripts/stake.py 抵押。"
+            f"PoQ-Stake：地址 {wallet.address_hex()} 抵押 {s/10**8:.4f} BTCQ < 最低 "
+            f"{MIN_STAKE/10**8:.4f} BTCQ。先用 scripts/stake.py 抵押。"
+        )
+    stake_map = chain.stake_map()
+    head = chain.head
+    expected = select_proposer(head.block_hash(), next_height, stake_map)
+    if expected is None:
+        raise RuntimeError("PoQ-Stake：全网无合格 staker，应该不会发生")
+    if expected != addr:
+        raise RuntimeError(
+            f"本 slot (高度 {next_height}) 选中的是 0x{expected.hex()}，不是你（0x{addr.hex()}）。"
+            f"等下一个 slot。"
         )
     if verbose:
-        print(f"[propose] 抵押验证通过：{s/10**8:.4f} BTCQ staked")
+        print(f"[propose] ✓ PoQ-Stake：你被 VRF 选中，抵押 {s/10**8:.4f} BTCQ")
 
 
 def propose_classical_simulator(

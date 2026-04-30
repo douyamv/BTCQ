@@ -52,6 +52,9 @@ python scripts/verify.py
 # 8. 链状态
 python scripts/stats.py
 python scripts/balance.py 0x<地址>
+
+# 9. 启动 P2P 节点（与他人组网）
+python scripts/node.py --port 8333 --peers http://其他节点:8333
 ```
 
 ---
