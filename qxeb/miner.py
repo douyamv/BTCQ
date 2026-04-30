@@ -147,7 +147,10 @@ def mine_ibm_quantum(
         if verbose:
             print(f"    job_id={job.job_id()}, waiting...")
         result = job.result()
-        counts = result[0].data.meas.get_counts()
+        # 自动定位经典寄存器（measure_all 命名 'meas'，但兼容其他名）
+        data = result[0].data
+        reg_name = list(data.keys())[0]
+        counts = getattr(data, reg_name).get_counts()
         samples = _samples_from_counts(counts, n_qubits, shots)
 
         # 经典验证 XEB

@@ -63,7 +63,7 @@ def build_circuit_description(seed: bytes, n_qubits: int, depth: int) -> Circuit
 def to_qiskit(desc: CircuitDescription, measure: bool = True):
     """将电路描述编译为 Qiskit QuantumCircuit。延迟导入避免无需量子时也强制依赖。"""
     from qiskit import QuantumCircuit
-    qc = QuantumCircuit(desc.n_qubits, desc.n_qubits if measure else 0)
+    qc = QuantumCircuit(desc.n_qubits)
     for g in desc.gates:
         if g.name == "h":
             qc.h(g.qubits[0])
@@ -76,7 +76,7 @@ def to_qiskit(desc: CircuitDescription, measure: bool = True):
         else:
             raise ValueError(f"未知门 {g.name}")
     if measure:
-        qc.measure(range(desc.n_qubits), range(desc.n_qubits))
+        qc.measure_all()    # 添加名为 'meas' 的经典寄存器
     return qc
 
 
