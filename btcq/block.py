@@ -46,7 +46,7 @@ class Block:
     height: int
     prev_hash: bytes              # 32
     timestamp: int
-    miner_address: bytes          # 20
+    proposer_address: bytes          # 20
     n_qubits: int
     depth: int
     n_samples: int
@@ -57,17 +57,17 @@ class Block:
     samples: List[int]            # 比特串以 int 表示，长度 = n_samples
     transactions: List[Transaction] = field(default_factory=list)
     transactions_root: bytes = b"\x00" * 32   # Merkle 根，无交易时为 0
-    miner_signature: bytes = b""  # 65, 由矿工签名后填入
+    proposer_signature: bytes = b""  # 65, 由矿工签名后填入
 
     # ===== 序列化 =====
     def header_bytes(self) -> bytes:
-        """规范化字节串，用于计算 block_hash 与 miner_signature。不含签名。"""
+        """规范化字节串，用于计算 block_hash 与 proposer_signature。不含签名。"""
         parts = [
             _u(self.version, 2),
             _u(self.height, 8),
             self.prev_hash,
             _u(self.timestamp, 8),
-            self.miner_address,
+            self.proposer_address,
             _u(self.n_qubits, 1),
             _u(self.depth, 1),
             _u(self.n_samples, 4),
@@ -90,7 +90,7 @@ class Block:
             "height":           self.height,
             "prev_hash":        "0x" + self.prev_hash.hex(),
             "timestamp":        self.timestamp,
-            "miner_address":    "0x" + self.miner_address.hex(),
+            "proposer_address":    "0x" + self.proposer_address.hex(),
             "n_qubits":         self.n_qubits,
             "depth":            self.depth,
             "n_samples":        self.n_samples,
@@ -101,7 +101,7 @@ class Block:
             "samples":          [int(x) for x in self.samples],
             "transactions":     [t.to_dict() for t in self.transactions],
             "transactions_root":"0x" + self.transactions_root.hex(),
-            "miner_signature":  "0x" + self.miner_signature.hex(),
+            "proposer_signature":  "0x" + self.proposer_signature.hex(),
             "block_hash":       "0x" + self.block_hash().hex(),
             "reward":           block_reward(self.height),
         }
@@ -116,7 +116,7 @@ class Block:
             height        = d["height"],
             prev_hash     = hx(d["prev_hash"]),
             timestamp     = d["timestamp"],
-            miner_address = hx(d["miner_address"]),
+            proposer_address = hx(d["proposer_address"]),
             n_qubits      = d["n_qubits"],
             depth         = d["depth"],
             n_samples     = d["n_samples"],
@@ -127,7 +127,7 @@ class Block:
             samples       = list(d["samples"]),
             transactions  = txs,
             transactions_root = hx(d.get("transactions_root", "0x" + "00" * 32)),
-            miner_signature = hx(d.get("miner_signature", "0x" + "00" * 65)),
+            proposer_signature = hx(d.get("proposer_signature", "0x" + "00" * 65)),
         )
 
     def save(self, path):

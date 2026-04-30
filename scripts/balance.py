@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from qxeb.chain import Chain
-from qxeb.constants import COIN
+from btcq.chain import Chain
+from btcq.constants import COIN
 
 
 def main():

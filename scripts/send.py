@@ -14,10 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from qxeb.wallet import Wallet
-from qxeb.chain import Chain
-from qxeb.mempool import Mempool
-from qxeb.constants import COIN
+from btcq.wallet import Wallet
+from btcq.chain import Chain
+from btcq.mempool import Mempool
+from btcq.constants import COIN
 
 
 def parse_amount(s: str) -> int:

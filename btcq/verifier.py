@@ -3,7 +3,7 @@
 from __future__ import annotations
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Optional
 
 from .block import Block, compute_samples_root, compute_transactions_root
 from .chain import Chain
@@ -86,12 +86,22 @@ def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
         ok, msg = _verify_transactions(block.transactions, chain_state)
         if not ok:
             return False, msg
-    # 8. 签名
-    if not Wallet.verify(block.block_hash(), block.miner_signature, block.miner_address):
-        return False, "矿工签名无效"
+    # 8. 出块人签名
+    if not Wallet.verify(block.block_hash(), block.proposer_signature, block.proposer_address):
+        return False, "出块人签名无效"
+    # 8b. 出块人是否有足够抵押（PoQ-Stake 关键约束）
+    # bootstrap 期（前 BOOTSTRAP_OPEN_BLOCKS 块）开放挖矿，无需抵押
+    from .constants import BOOTSTRAP_OPEN_BLOCKS, MIN_STAKE
+    if chain_state is not None and block.height > BOOTSTRAP_OPEN_BLOCKS:
+        from .stake import stake_state_at
+        prior_blocks = [chain_state.get(h) for h in range(0, block.height)]
+        stake_map = stake_state_at(prior_blocks)
+        if stake_map.get(block.proposer_address, 0) < MIN_STAKE:
+            return False, f"出块人 {block.proposer_address.hex()} 抵押不足，无资格出块"
     # 9. 重算电路 + XEB（最贵的一步，可选）
     if recompute_xeb:
-        seed = keccak256(block.prev_hash + block.nonce.to_bytes(8, "big") + block.miner_address)
+        # PoQ-Stake：seed 由 prev_hash + height + proposer 决定（不再有矿工 nonce）
+        seed = keccak256(block.prev_hash + block.height.to_bytes(8, "big") + block.proposer_address)
         desc = build_circuit_description(seed, block.n_qubits, block.depth)
         probs = amplitudes_for_samples(desc, block.samples)
         f_xeb = linear_xeb_from_probs(probs, block.n_qubits)
@@ -114,7 +124,7 @@ def verify_chain(chain_dir: str | Path, *, recompute_xeb: bool = True) -> Tuple[
 
     # 用一个"逐步追加"的影子链来代表每个高度时的状态
     import tempfile, shutil
-    tmpdir = Path(tempfile.mkdtemp(prefix="qxeb-verify-"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="btcq-verify-"))
     try:
         shadow = Chain(tmpdir)
         shadow.append(full_chain.get(0))   # 复制创世

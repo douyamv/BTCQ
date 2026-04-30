@@ -1,6 +1,6 @@
 # 贡献指南
 
-欢迎参与 QXEB。先看 [白皮书](docs/WHITEPAPER.md) 与 [协议规范](docs/PROTOCOL.md)，再考虑贡献方向。
+欢迎参与 BTCQ。先看 [白皮书](docs/WHITEPAPER.md) 与 [协议规范](docs/PROTOCOL.md)，再考虑贡献方向。
 
 ## 优先方向
 
@@ -10,7 +10,7 @@
 
 2. **多硬件矿工后端**
    * IonQ、Quantinuum、Atom Computing、Google Quantum AI 适配器
-   * 接口模式参照 `qxeb/miner.py::mine_ibm_quantum`
+   * 接口模式参照 `btcq/miner.py::mine_ibm_quantum`
 
 3. **P2P 网络层**（v0.5 蓝图）
    * 轻量节点发现、区块/交易广播

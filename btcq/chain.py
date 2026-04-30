@@ -50,21 +50,66 @@ class Chain:
 
     # ====== 经济 ======
     def balance_of(self, address_bytes: bytes) -> int:
+        """流动余额（不含正在抵押与冷却中的金额）。
+
+        转账：sender -= amount, recipient += amount
+        抵押 (stake)：sender -= amount（钱被锁进金库；记入 staked_of）
+        解抵押 (unstake)：发起当下不影响余额；
+            等到 height + UNSTAKE_DELAY_BLOCKS 时金额回到 sender 的流动余额
+        出块奖励：proposer += block_reward
+        """
+        from .constants import UNSTAKE_DELAY_BLOCKS
         total = 0
+        current_h = self.height
         for b in self._blocks:
-            # 挖矿奖励
-            if b.miner_address == address_bytes:
+            if b.proposer_address == address_bytes:
                 total += block_reward(b.height)
-            # 转账影响
             for tx in b.transactions:
-                if tx.sender == address_bytes:
-                    total -= tx.amount
-                if tx.recipient == address_bytes:
-                    total += tx.amount
+                if tx.kind == "transfer":
+                    if tx.sender == address_bytes:
+                        total -= tx.amount
+                    if tx.recipient == address_bytes:
+                        total += tx.amount
+                elif tx.kind == "stake":
+                    if tx.sender == address_bytes:
+                        total -= tx.amount    # 锁进抵押池
+                elif tx.kind == "unstake":
+                    if tx.sender == address_bytes:
+                        # 已度过冷却期？
+                        if b.height + UNSTAKE_DELAY_BLOCKS <= current_h:
+                            total += tx.amount
         return total
 
+    def staked_of(self, address_bytes: bytes) -> int:
+        """当前活跃抵押额。"""
+        from .stake import stake_state_at
+        return stake_state_at(self._blocks).get(address_bytes, 0)
+
+    def cooling_of(self, address_bytes: bytes) -> int:
+        """正在冷却中（已申请解抵押但还没度过 UNSTAKE_DELAY_BLOCKS）的金额。"""
+        from .constants import UNSTAKE_DELAY_BLOCKS
+        total = 0
+        current_h = self.height
+        for b in self._blocks:
+            for tx in b.transactions:
+                if tx.kind == "unstake" and tx.sender == address_bytes:
+                    if b.height + UNSTAKE_DELAY_BLOCKS > current_h:
+                        total += tx.amount
+        return total
+
+    def total_balance_of(self, address_bytes: bytes) -> int:
+        """流动 + 抵押 + 冷却（用户的全部资产）。"""
+        return self.balance_of(address_bytes) + self.staked_of(address_bytes) + self.cooling_of(address_bytes)
+
+    def stake_map(self) -> dict:
+        """全网当前抵押映射 {address: stake_amount}。"""
+        from .stake import stake_state_at
+        return stake_state_at(self._blocks)
+
+    def total_stake(self) -> int:
+        return sum(self.stake_map().values())
+
     def nonce_of(self, address_bytes: bytes) -> int:
-        """返回地址下一笔交易应使用的 nonce（已上链交易数）。"""
         n = 0
         for b in self._blocks:
             for tx in b.transactions:

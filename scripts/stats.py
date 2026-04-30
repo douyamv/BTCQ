@@ -7,8 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from qxeb.chain import Chain
-from qxeb.constants import (
+from btcq.chain import Chain
+from btcq.constants import (
     COIN, TOTAL_SUPPLY, INITIAL_BLOCK_REWARD, HALVING_INTERVAL,
     GENESIS_TIMESTAMP, target_block_time_at, difficulty_window_at,
 )
@@ -28,7 +28,7 @@ def main():
     next_difficulty = chain.next_difficulty()
 
     print("=" * 60)
-    print("QXEB 链状态")
+    print("BTCQ 链状态")
     print("=" * 60)
     print(f"  链高度:                {chain.height}")
     print(f"  最新区块哈希:          0x{head.block_hash().hex()[:32]}...")
@@ -43,8 +43,8 @@ def main():
     print(f"  当前难度调整窗口:      每 {window} 块")
     print(f"  下一区块难度（XEB ≥）: {next_difficulty:.4f}")
     print()
-    print(f"  总供应:                {chain.total_supply_so_far() / COIN:,.4f} / {TOTAL_SUPPLY / COIN:,.0f} QXEB")
-    print(f"  下一区块奖励:          {(INITIAL_BLOCK_REWARD >> ((chain.height + 1) // HALVING_INTERVAL)) / COIN:.4f} QXEB")
+    print(f"  总供应:                {chain.total_supply_so_far() / COIN:,.4f} / {TOTAL_SUPPLY / COIN:,.0f} BTCQ")
+    print(f"  下一区块奖励:          {(INITIAL_BLOCK_REWARD >> ((chain.height + 1) // HALVING_INTERVAL)) / COIN:.4f} BTCQ")
     print(f"  距下次减半:            {HALVING_INTERVAL - (chain.height + 1) % HALVING_INTERVAL} 块")
     print()
     print(f"  电路参数:              n={head.n_qubits}, depth={head.depth}, samples={head.n_samples}")

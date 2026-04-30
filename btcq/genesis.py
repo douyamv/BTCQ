@@ -13,7 +13,7 @@ def make_genesis() -> Block:
         height          = 0,
         prev_hash       = GENESIS_PREV_HASH,
         timestamp       = GENESIS_TIMESTAMP,
-        miner_address   = b"\x00" * 20,
+        proposer_address   = b"\x00" * 20,
         n_qubits        = CIRCUIT_N_QUBITS,
         depth           = CIRCUIT_DEPTH,
         n_samples       = 0,                  # 创世不含样本
@@ -22,7 +22,7 @@ def make_genesis() -> Block:
         samples_root    = b"\x00" * 32,
         xeb_score       = 0.0,
         samples         = [],
-        miner_signature = b"\x00" * 65,
+        proposer_signature = b"\x00" * 65,
     )
     return g
 

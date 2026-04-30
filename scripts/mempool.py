@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from qxeb.mempool import Mempool
-from qxeb.constants import COIN
+from btcq.mempool import Mempool
+from btcq.constants import COIN
 
 
 def main():
@@ -18,7 +18,8 @@ def main():
     print(f"待打包交易：{len(mp)} 笔")
     print("-" * 70)
     for i, tx in enumerate(mp.all()):
-        print(f"  [{i}] {tx.amount/COIN:.4f} QXEB")
+        kind = getattr(tx, "kind", "transfer")
+        print(f"  [{i}] {tx.amount/COIN:.4f} BTCQ  [{kind}]")
         print(f"      from:  0x{tx.sender.hex()}")
         print(f"      to:    0x{tx.recipient.hex()}")
         print(f"      nonce: {tx.nonce}")

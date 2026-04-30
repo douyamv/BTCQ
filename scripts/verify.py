@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from qxeb.verifier import verify_chain
+from btcq.verifier import verify_chain
 
 
 def main():

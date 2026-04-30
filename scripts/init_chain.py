@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from qxeb.chain import Chain
-from qxeb.genesis import make_genesis, genesis_message
+from btcq.chain import Chain
+from btcq.genesis import make_genesis, genesis_message
 
 
 def main():
