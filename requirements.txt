@@ -1,0 +1,8 @@
+numpy>=1.24
+pycryptodome>=3.18
+eth-keys>=0.4.0
+qiskit>=2.0
+qiskit-ibm-runtime>=0.35
+
+# 可选：GPU 加速验证（v1.0 推荐）
+# qiskit-aer-gpu
