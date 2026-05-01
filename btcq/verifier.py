@@ -141,6 +141,12 @@ def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
         ok, msg = _verify_transactions(block.transactions, chain_state)
         if not ok:
             return False, msg
+    # 7d. C1: state_root 一致性（账户模型必须）
+    if chain_state is not None:
+        expected_state_root = chain_state.preview_state_root(block)
+        if block.state_root != expected_state_root:
+            return False, (f"state_root 不一致：链上 0x{block.state_root.hex()[:16]}... "
+                           f"vs 期望 0x{expected_state_root.hex()[:16]}...")
     # 8. 出块人签名
     if not Wallet.verify(block.block_hash(), block.proposer_signature, block.proposer_address):
         return False, "出块人签名无效"

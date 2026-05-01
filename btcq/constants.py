@@ -12,24 +12,73 @@ GENESIS_MESSAGE        = (
     "Thanks, Satoshi."
 )
 
-# === 创世致敬：Satoshi Nakamoto 永久纪念地址 ===
-# 地址由确定性短语派生，私钥不可恢复（实际等同烧毁地址，作为永久纪念物）
-# 50 BTCQ 永远锁在这个地址，纪念中本聪 2008 年的发现
-def _satoshi_tribute_addr() -> bytes:
+# === 创世致敬地址：永久纪念加密货币史的开拓者 ===
+# 每个地址由确定性短语派生 keccak256(phrase)[-20:]，私钥不可恢复
+# 这些地址持币永远锁定，作为加密货币史的纪念物
+def _tribute_addr(phrase: str) -> bytes:
     from Crypto.Hash import keccak as _keccak
     h = _keccak.new(digest_bits=256)
-    h.update(b"Satoshi Nakamoto - thank you for Bitcoin. From the quantum frontier.")
+    h.update(phrase.encode("utf-8"))
     return h.digest()[-20:]
 
-SATOSHI_TRIBUTE_ADDR    = _satoshi_tribute_addr()  # bytes20
-SATOSHI_TRIBUTE_AMOUNT  = 50 * 10**8                # 50 BTCQ
+# 1. Satoshi Nakamoto — Bitcoin 的匿名创造者
+SATOSHI_TRIBUTE_ADDR = _tribute_addr(
+    "Satoshi Nakamoto - thank you for Bitcoin. From the quantum frontier."
+)
+# 2. Vitalik Buterin — Ethereum 创始人，账户模型 + 智能合约的核心推动者
+VITALIK_TRIBUTE_ADDR = _tribute_addr(
+    "Vitalik Buterin - thank you for Ethereum. Account model + smart contracts."
+)
+# 3. Hal Finney — Bitcoin 第一笔交易接收人，PoW 早期理论家
+HAL_TRIBUTE_ADDR = _tribute_addr(
+    "Hal Finney - thank you for RPOW and Bitcoin's first transaction. RIP."
+)
+# 4. Nick Szabo — Smart Contracts、Bit Gold 提出者
+NICK_TRIBUTE_ADDR = _tribute_addr(
+    "Nick Szabo - thank you for Bit Gold and smart contracts. Pioneer."
+)
+# 5. David Chaum — DigiCash、ecash，加密货币之父级人物
+CHAUM_TRIBUTE_ADDR = _tribute_addr(
+    "David Chaum - thank you for DigiCash and electronic cash blueprints."
+)
+# 6. Wei Dai — b-money 提案人，比特币白皮书引用第一人
+WEIDAI_TRIBUTE_ADDR = _tribute_addr(
+    "Wei Dai - thank you for b-money and the cryptographic foundations."
+)
 
-# === 创世预分配（GENESIS_ALLOCATIONS） ===
-# 在创世状态中，下列地址持有指定数量的 BTCQ。验证者必须知道这一映射。
-# v0.1.x 仅纪念 Satoshi；未来可加入早期生态地址（公开募资）
+# 量子先驱致敬
+# 7. Peter Shor — Shor 算法发明人（让本协议存在的数学基础）
+SHOR_TRIBUTE_ADDR = _tribute_addr(
+    "Peter Shor - thank you for Shor's algorithm. Why we exist."
+)
+# 8. John Preskill — NISQ 概念提出者，量子优越性命名者
+PRESKILL_TRIBUTE_ADDR = _tribute_addr(
+    "John Preskill - thank you for naming NISQ and quantum supremacy."
+)
+
+# === 生态运营预留地址 ===
+# 公开未托管地址，用于：早期 faucet、bug bounty、社区资助
+# 私钥保存在硬件钱包，多签控制（v0.5+）
+# v0.1.x 测试网阶段：用于让早期参与者先抵押启动 PoQ-Stake
+ECOSYSTEM_FAUCET_ADDR = _tribute_addr(
+    "BTCQ ecosystem faucet - early adopters, bounties, community grants."
+)
+
 GENESIS_ALLOCATIONS = {
-    SATOSHI_TRIBUTE_ADDR: SATOSHI_TRIBUTE_AMOUNT,
+    SATOSHI_TRIBUTE_ADDR:   50 * 10**8,    # 50 BTCQ — Bitcoin 创造者
+    VITALIK_TRIBUTE_ADDR:   25 * 10**8,    # 25 BTCQ — Ethereum 创造者
+    HAL_TRIBUTE_ADDR:       10 * 10**8,    # 10 BTCQ — 早期 Bitcoin 工程
+    NICK_TRIBUTE_ADDR:      10 * 10**8,    # 10 BTCQ — 智能合约前身
+    CHAUM_TRIBUTE_ADDR:     10 * 10**8,    # 10 BTCQ — 加密货币之父
+    WEIDAI_TRIBUTE_ADDR:    10 * 10**8,    # 10 BTCQ — b-money
+    SHOR_TRIBUTE_ADDR:      25 * 10**8,    # 25 BTCQ — Shor 算法
+    PRESKILL_TRIBUTE_ADDR:  10 * 10**8,    # 10 BTCQ — NISQ 命名
+    ECOSYSTEM_FAUCET_ADDR: 100 * 10**8,    # 100 BTCQ — 生态运营，早期 staker 启动金
 }
+# 总计：250 BTCQ 创世预分配（其中 150 BTCQ 永久纪念锁定，100 BTCQ 生态运营）
+
+# 兼容老接口
+SATOSHI_TRIBUTE_AMOUNT = GENESIS_ALLOCATIONS[SATOSHI_TRIBUTE_ADDR]
 
 # === 经济模型（完全照搬 Bitcoin） ===
 COIN                   = 10**8             # 1 BTCQ = 10^8 atomic units (sat-like)

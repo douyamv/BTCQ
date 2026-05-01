@@ -317,6 +317,8 @@ def _finalize_block(chain, wallet, prev_hash, head, height, slot, n_qubits, dept
         transactions      = txs,
         transactions_root = tx_root,
     )
+    # C1：先算 state_root，再签名（block_hash 包含 state_root）
+    block.state_root = chain.preview_state_root(block)
     block.proposer_signature = wallet.sign(block.block_hash())
     chain.append(block)
     if mempool is not None and txs:

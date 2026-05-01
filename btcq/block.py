@@ -63,11 +63,13 @@ class Block:
     samples: List[int]
     transactions: List[Transaction] = field(default_factory=list)
     transactions_root: bytes = b"\x00" * 32
+    state_root: bytes = b"\x00" * 32   # v0.1.4+ (C1)：账户状态 Merkle 根
     proposer_signature: bytes = b""  # 65
 
     # ===== 序列化 =====
     def header_bytes(self) -> bytes:
-        """规范化字节串，用于计算 block_hash 与 proposer_signature。不含签名。"""
+        """规范化字节串，用于计算 block_hash 与 proposer_signature。不含签名。
+        v0.1.4 起含 state_root（C1）。"""
         parts = [
             _u(self.version, 2),
             _u(self.height, 8),
@@ -83,6 +85,7 @@ class Block:
             _f64(self.xeb_score),
             self.transactions_root,
             _u(len(self.transactions), 4),
+            self.state_root,
         ]
         return b"".join(parts)
 
@@ -107,6 +110,7 @@ class Block:
             "samples":          [int(x) for x in self.samples],
             "transactions":     [t.to_dict() for t in self.transactions],
             "transactions_root":"0x" + self.transactions_root.hex(),
+            "state_root":       "0x" + self.state_root.hex(),
             "proposer_signature":"0x" + self.proposer_signature.hex(),
             "block_hash":       "0x" + self.block_hash().hex(),
             "reward":           block_reward(self.height),
@@ -133,6 +137,7 @@ class Block:
             samples       = list(d["samples"]),
             transactions  = txs,
             transactions_root = hx(d.get("transactions_root", "0x" + "00" * 32)),
+            state_root    = hx(d.get("state_root", "0x" + "00" * 32)),
             proposer_signature = hx(d.get("proposer_signature", "0x" + "00" * 65)),
         )
 

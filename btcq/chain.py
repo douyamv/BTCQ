@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 import json
 
-from .block import Block, block_reward
+from .block import Block, block_reward, merkle_root
 from .constants import (
     DIFFICULTY_MIN_FACTOR, DIFFICULTY_MAX_FACTOR,
     DIFFICULTY_MIN, DIFFICULTY_MAX, GENESIS_TIMESTAMP,
@@ -178,6 +178,88 @@ class Chain:
 
     def slash_records(self) -> list:
         return list(self._slash_records)
+
+    # ====== C1: 状态根（State Root） ======
+    def compute_state_root(self) -> bytes:
+        """计算当前状态的 Merkle 根（balance + stake + nonce 三栏的规范化哈希）。
+
+        canonical encoding: 排序后所有出现过的地址，对每个地址：
+          addr (20) || balance (16 BE) || stake (16 BE) || nonce (8 BE)
+        leaves = [keccak256(addr_payload) for addr in sorted_addrs]
+        state_root = merkle_root(leaves)
+        """
+        all_addrs = set(self._balance) | set(self._stake_map) | set(self._nonce)
+        sorted_addrs = sorted(all_addrs)
+        leaves = []
+        for addr in sorted_addrs:
+            bal = self._balance.get(addr, 0)
+            stk = self._stake_map.get(addr, 0)
+            non = self._nonce.get(addr, 0)
+            payload = (
+                addr +
+                bal.to_bytes(16, "big") +
+                stk.to_bytes(16, "big") +
+                non.to_bytes(8, "big")
+            )
+            from .wallet import keccak256
+            leaves.append(keccak256(payload))
+        return merkle_root(leaves)
+
+    def preview_state_root(self, block) -> bytes:
+        """预览：如果 block 被 append，state_root 会是什么？
+
+        用克隆缓存模拟 append，不修改实际状态。
+        """
+        bal = dict(self._balance)
+        stk = dict(self._stake_map)
+        non = dict(self._nonce)
+        cooling = list(self._cooling)
+        cur_h = block.height
+
+        # 1. 释放到期冷却
+        from .constants import UNSTAKE_DELAY_BLOCKS
+        still_cooling = []
+        for (h, a, amt) in cooling:
+            if h <= cur_h:
+                bal[a] = bal.get(a, 0) + amt
+            else:
+                still_cooling.append((h, a, amt))
+
+        # 2. 出块奖励
+        if block.height > 0:
+            from .block import block_reward
+            bal[block.proposer_address] = bal.get(block.proposer_address, 0) + block_reward(block.height)
+
+        # 3. 交易
+        for tx in block.transactions:
+            if tx.kind == "transfer":
+                bal[tx.sender] = bal.get(tx.sender, 0) - tx.amount
+                bal[tx.recipient] = bal.get(tx.recipient, 0) + tx.amount
+            elif tx.kind == "stake":
+                bal[tx.sender] = bal.get(tx.sender, 0) - tx.amount
+                stk[tx.sender] = stk.get(tx.sender, 0) + tx.amount
+            elif tx.kind == "unstake":
+                stk[tx.sender] = stk.get(tx.sender, 0) - tx.amount
+            non[tx.sender] = non.get(tx.sender, 0) + 1
+
+        # 4. 清理 0 值（保持与实际状态缓存一致：0 不在 dict 里）
+        bal = {k: v for k, v in bal.items() if v != 0}
+        stk = {k: v for k, v in stk.items() if v != 0}
+        non = {k: v for k, v in non.items() if v != 0}
+
+        all_addrs = set(bal) | set(stk) | set(non)
+        sorted_addrs = sorted(all_addrs)
+        leaves = []
+        from .wallet import keccak256
+        for addr in sorted_addrs:
+            payload = (
+                addr +
+                bal.get(addr, 0).to_bytes(16, "big") +
+                stk.get(addr, 0).to_bytes(16, "big") +
+                non.get(addr, 0).to_bytes(8, "big")
+            )
+            leaves.append(keccak256(payload))
+        return merkle_root(leaves)
 
     def total_slashed(self) -> int:
         """已被罚没的 BTCQ 总额（atomic）。"""
