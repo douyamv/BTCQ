@@ -27,19 +27,62 @@ case "$(uname -s)" in
 esac
 green "✓ 检测到 $OS"
 
-# 2) Python 3
+# Linux 包管理器检测
+PKG=""
+if [ "$OS" = "Linux" ]; then
+  if command -v apt-get >/dev/null 2>&1; then
+    PKG="apt-get"
+  elif command -v dnf >/dev/null 2>&1; then
+    PKG="dnf"
+  elif command -v yum >/dev/null 2>&1; then
+    PKG="yum"
+  fi
+  green "✓ 包管理器: ${PKG:-unknown}"
+fi
+
+linux_install() {
+  case "$PKG" in
+    apt-get) sudo apt-get update -qq && sudo apt-get install -y "$@";;
+    dnf)     sudo dnf install -y "$@";;
+    yum)     sudo yum install -y "$@";;
+    *)       red "未识别的 Linux 发行版"; return 1;;
+  esac
+}
+
+# 2) Python 3.10+
+need_python_install=0
 if command -v python3 >/dev/null 2>&1; then
-  green "✓ Python: $(python3 --version 2>&1)"
+  PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+  PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
+  PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
+  if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
+    yellow "⚠ Python $PY_VER 太旧（需 3.10+）"
+    need_python_install=1
+  else
+    green "✓ Python $PY_VER"
+  fi
 else
-  yellow "⚠ 未检测到 python3，尝试自动安装..."
+  yellow "⚠ 未检测到 python3"
+  need_python_install=1
+fi
+
+if [ "$need_python_install" -eq 1 ]; then
   if [ "$OS" = "macOS" ]; then
     if ! command -v brew >/dev/null 2>&1; then
       red "请先安装 Homebrew: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
       exit 1
     fi
     brew install python@3.11
-  else
-    sudo apt-get update && sudo apt-get install -y python3 python3-pip python3-venv
+  elif [ "$PKG" = "apt-get" ]; then
+    linux_install python3 python3-pip python3-venv
+  elif [ "$PKG" = "dnf" ] || [ "$PKG" = "yum" ]; then
+    # RHEL/CentOS：装 python3.11
+    linux_install python3.11 python3.11-pip || linux_install python311 python311-pip || linux_install python3
+    # 让 python3 指向高版本
+    if command -v python3.11 >/dev/null 2>&1 && ! python3 -c 'import sys; assert sys.version_info >= (3, 10)' 2>/dev/null; then
+      sudo alternatives --set python3 /usr/bin/python3.11 2>/dev/null || \
+        sudo ln -sf "$(command -v python3.11)" /usr/local/bin/python3
+    fi
   fi
   green "✓ Python: $(python3 --version 2>&1)"
 fi
@@ -47,7 +90,8 @@ fi
 # 3) pip
 if ! python3 -m pip --version >/dev/null 2>&1; then
   yellow "⚠ pip 未就绪，自动安装 ensurepip..."
-  python3 -m ensurepip --upgrade || python3 -m pip install --upgrade pip
+  python3 -m ensurepip --upgrade 2>/dev/null || \
+    curl -fsSL https://bootstrap.pypa.io/get-pip.py | sudo python3
 fi
 green "✓ pip $(python3 -m pip --version | awk '{print $2}')"
 
@@ -57,7 +101,7 @@ if ! command -v git >/dev/null 2>&1; then
   if [ "$OS" = "macOS" ]; then
     xcode-select --install 2>/dev/null || true
   else
-    sudo apt-get install -y git
+    linux_install git
   fi
 fi
 green "✓ Git: $(git --version | awk '{print $3}')"
