@@ -72,7 +72,8 @@ def main():
                    "--shots", str(args.shots)]
             if args.mode == "quantum":
                 cmd.extend(["--backend", args.backend])
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            # IBM Quantum 队列可能排几分钟到几十分钟，不要太短
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
             if r.returncode == 0 and "区块出块成功" in r.stdout:
                 blocks_mined += 1
                 for line in r.stdout.splitlines():
