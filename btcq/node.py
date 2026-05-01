@@ -138,6 +138,20 @@ class Node:
                 "total_slashed":self.chain.total_slashed(),
             })
 
+        @a.post("/reload")
+        def reload_chain():
+            """重新从磁盘加载链（用于挖矿进程提示节点同步）。"""
+            old_h = self.chain.height
+            self.chain = Chain(self.chain_dir)
+            new_h = self.chain.height
+            if new_h > old_h and self.verbose:
+                print(f"[node] 重新加载：高度 {old_h} → {new_h}")
+            return jsonify({"ok": True, "old_height": old_h, "new_height": new_h})
+
+        @a.get("/reload")    # GET 也接受，方便 curl
+        def reload_chain_get():
+            return reload_chain()
+
         @a.get("/slashes")
         def get_slashes():
             return jsonify({
@@ -406,6 +420,15 @@ class Node:
         if self.verbose:
             print(f"[node] 同步循环启动（每 {SYNC_INTERVAL_SEC} 秒一次）")
         while not self._stop.is_set():
+            # 1. 先检测本地有无新挖出的块（自动挖矿守护进程写入）
+            try:
+                added = self.chain.reload_new_blocks()
+                if added > 0 and self.verbose:
+                    print(f"[node] 检测到本地新区块：高度 +{added} 至 {self.chain.height}")
+            except Exception as e:
+                if self.verbose:
+                    print(f"[node] reload 异常：{e}")
+            # 2. 与 peer 同步
             for url in list(self.peers):
                 info = self._ping_peer(url)
                 if info:

@@ -56,6 +56,26 @@ class Chain:
         # 重启后恢复 slash 历史（已应用过的扣减不会重复）
         self._load_slash_records()
 
+    def reload_new_blocks(self) -> int:
+        """从磁盘检测并加载新区块（仅追加，不回滚）。返回新增块数。
+
+        给守护进程：每次 tick 调用一次，让节点同步外部挖矿写入的新块。
+        """
+        blocks_dir = self.dir / "blocks"
+        files = sorted(
+            (p for p in blocks_dir.glob("*.json") if p.stem.isdigit() and int(p.stem) > self.height),
+            key=lambda p: int(p.stem),
+        )
+        added = 0
+        for f in files:
+            block = Block.load(f)
+            if block.height != self.height + 1:
+                break    # 高度不连续，停
+            self._blocks.append(block)
+            self._update_state_caches(block)
+            added += 1
+        return added
+
     def _apply_genesis_allocations(self):
         """创世状态预分配（致敬 Satoshi 等）。仅在创世后立即调用。"""
         for addr, amount in GENESIS_ALLOCATIONS.items():
