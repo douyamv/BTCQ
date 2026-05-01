@@ -17,7 +17,10 @@ from .circuit import build_circuit_description, simulate_statevector, amplitudes
 from .xeb import linear_xeb, linear_xeb_from_probs
 from .wallet import Wallet, keccak256
 from .transaction import Transaction
-from .stake import STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE, select_proposer_for_slot
+from .stake import (
+    STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE,
+    select_proposer_for_slot, select_bootstrap_proposer,
+)
 from .constants import (
     PROTOCOL_VERSION, CIRCUIT_N_QUBITS, CIRCUIT_DEPTH,
     XEB_FLOAT_TOL, TIMESTAMP_FUTURE_TOL,
@@ -145,11 +148,21 @@ def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
     # 8b. 共识层资格检查（PoQ-Stake 核心，第二道防线）
     if chain_state is not None:
         if block.height <= BOOTSTRAP_OPEN_BLOCKS:
-            # bootstrap 期：开放挖矿，但单地址有上限
+            # bootstrap 期：单地址 cap + 已注册集合 VRF
             mined_so_far = chain_state.bootstrap_blocks_by(block.proposer_address)
             if mined_so_far >= BOOTSTRAP_PER_ADDR_CAP:
-                return False, (f"bootstrap 期 {block.proposer_address.hex()} 已挖 "
+                return False, (f"bootstrap 期 0x{block.proposer_address.hex()} 已挖 "
                                f"{mined_so_far} 块，达到 {BOOTSTRAP_PER_ADDR_CAP} 上限")
+            # Issue 4 修复：bootstrap 期也走 VRF（如果候选集非空）
+            miners_map = chain_state.bootstrap_miners_map()
+            stake_map = chain_state.stake_map()
+            expected = select_bootstrap_proposer(
+                block.slot, miners_map, BOOTSTRAP_PER_ADDR_CAP, stake_map
+            )
+            if expected is not None and block.proposer_address != expected:
+                return False, (f"bootstrap slot {block.slot} VRF 选中的是 "
+                               f"0x{expected.hex()}，不是 0x{block.proposer_address.hex()}")
+            # expected is None 时（创世后第 1 块或所有人都达上限）→ 开放挖矿
         else:
             # PoQ-Stake 期：必须是当前 slot 的 VRF proposer
             stake_map = chain_state.stake_map()

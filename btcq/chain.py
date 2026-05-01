@@ -18,6 +18,7 @@ from .constants import (
     INITIAL_XEB_THRESHOLD, POQSTAKE_XEB_THRESHOLD_FLOOR,
     BOOTSTRAP_OPEN_BLOCKS, BOOTSTRAP_PER_ADDR_CAP,
     UNSTAKE_DELAY_BLOCKS, SLASH_RATIO, COIN,
+    GENESIS_ALLOCATIONS,
     target_block_time_at, difficulty_window_at,
 )
 
@@ -52,9 +53,20 @@ class Chain:
             block = Block.load(f)
             self._blocks.append(block)
             self._update_state_caches(block)
+        # 重启后恢复 slash 历史（已应用过的扣减不会重复）
+        self._load_slash_records()
+
+    def _apply_genesis_allocations(self):
+        """创世状态预分配（致敬 Satoshi 等）。仅在创世后立即调用。"""
+        for addr, amount in GENESIS_ALLOCATIONS.items():
+            self._balance[addr] = self._balance.get(addr, 0) + amount
 
     def _update_state_caches(self, block: Block):
         """append/load 时增量更新所有状态缓存。O(交易数)。"""
+        # 0. 创世块：应用预分配（Satoshi 等）
+        if block.height == 0:
+            self._apply_genesis_allocations()
+            return
         # 1. 释放已到期的冷却（资金回流流动余额）
         still_cooling = []
         for (h, a, amt) in self._cooling:
@@ -139,10 +151,21 @@ class Chain:
         """该地址在 bootstrap 期已经挖了多少块。"""
         return self._bootstrap_blocks_by_addr.get(address_bytes, 0)
 
+    def bootstrap_miners_map(self) -> Dict[bytes, int]:
+        """bootstrap 已注册矿工映射 {address: count}（O(1)，缓存副本）。"""
+        return dict(self._bootstrap_blocks_by_addr)
+
     def slash(self, address: bytes, height: int, reason: str) -> int:
-        """对违规出块人执行罚没。返回扣除的金额（atomic）。"""
+        """对违规出块人执行罚没。返回扣除的金额（atomic）。
+
+        slash 立即从 _stake_map 扣除，并持久化到 slash_records.json。
+        持久化让重启后罚没记录不丢失，跨节点观察一致。
+        """
         cur = self._stake_map.get(address, 0)
         if cur <= 0:
+            # 没抵押也记录违规，方便可观察（amount=0）
+            self._slash_records.append((height, address, 0, reason + " [无抵押可罚]"))
+            self._save_slash_records()
             return 0
         amount = max(int(0.001 * COIN), int(cur * SLASH_RATIO))   # 最少 0.001 BTCQ
         amount = min(amount, cur)
@@ -150,24 +173,59 @@ class Chain:
         if self._stake_map[address] == 0:
             del self._stake_map[address]
         self._slash_records.append((height, address, amount, reason))
+        self._save_slash_records()
         return amount
 
     def slash_records(self) -> list:
         return list(self._slash_records)
 
+    def total_slashed(self) -> int:
+        """已被罚没的 BTCQ 总额（atomic）。"""
+        return sum(amt for (_, _, amt, _) in self._slash_records)
+
+    def _save_slash_records(self):
+        path = self.dir / "slash_records.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = [
+            {"height": h, "address": "0x" + a.hex(), "amount": amt, "reason": r}
+            for (h, a, amt, r) in self._slash_records
+        ]
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+    def _load_slash_records(self):
+        path = self.dir / "slash_records.json"
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+            for r in data:
+                addr = bytes.fromhex(r["address"][2:] if r["address"].startswith("0x") else r["address"])
+                self._slash_records.append((r["height"], addr, r["amount"], r["reason"]))
+                # 重新应用扣减（如果当前还有抵押）
+                if r["amount"] > 0 and self._stake_map.get(addr, 0) >= r["amount"]:
+                    self._stake_map[addr] -= r["amount"]
+                    if self._stake_map[addr] == 0:
+                        del self._stake_map[addr]
+        except Exception:
+            pass
+
     # ====== Reorg / Fork choice 支持（Issue 3） ======
-    def rewind_to(self, target_height: int) -> int:
-        """回滚链到指定高度。删除其后的区块文件，重建状态缓存。返回回滚的块数。"""
+    def rewind_to(self, target_height: int, mempool=None) -> List["Block"]:
+        """回滚链到指定高度，返回被回滚的区块列表（供 reorg 后回流交易用）。
+
+        修复 Bug R1：清理 height > target 的 slash 记录
+        修复 Bug R2：被回滚的区块返回，调用方可把其交易塞回 mempool
+        """
         if target_height >= self.height:
-            return 0
+            return []
         if target_height < 0:
             target_height = 0
-        removed = 0
+        rolled_back: List["Block"] = []
         for h in range(target_height + 1, self.height + 1):
+            rolled_back.append(self._blocks[h])
             f = self.dir / "blocks" / f"{h:08d}.json"
             if f.exists():
                 f.unlink()
-            removed += 1
         # 截断 + 重建状态缓存
         self._blocks = self._blocks[:target_height + 1]
         self._stake_map.clear()
@@ -175,13 +233,38 @@ class Chain:
         self._nonce.clear()
         self._cooling.clear()
         self._bootstrap_blocks_by_addr.clear()
+        # R1：删除 height > target 的 slash 记录（这些是被回滚那些块时产生的）
+        kept_slashes = []
+        for (h, addr, amt, reason) in self._slash_records:
+            if h <= target_height:
+                kept_slashes.append((h, addr, amt, reason))
+        self._slash_records = kept_slashes
+        self._save_slash_records()
+        # 重建经济状态
         for b in self._blocks:
             self._update_state_caches(b)
+        # 重新应用保留下来的 slash（在状态重建后）
+        for (h, addr, amt, reason) in self._slash_records:
+            if amt > 0:
+                cur = self._stake_map.get(addr, 0)
+                if cur >= amt:
+                    self._stake_map[addr] = cur - amt
+                    if self._stake_map[addr] == 0:
+                        del self._stake_map[addr]
+        # R2：把被回滚区块里的合法交易塞回 mempool
+        if mempool is not None:
+            from .transaction import Transaction
+            for blk in rolled_back:
+                for tx in blk.transactions:
+                    try:
+                        mempool.add(tx)
+                    except Exception:
+                        pass    # 重复或非法的就跳过
         # 刷新 latest 软链
         if self._blocks:
             (self.dir / "blocks" / "latest.json").write_text(
                 json.dumps(self._blocks[-1].to_dict(), indent=2, ensure_ascii=False))
-        return removed
+        return rolled_back
 
     def find_common_ancestor_height(self, peer_blocks_by_height: dict) -> int:
         """从顶部向下找与对方链的最高共同祖先。peer_blocks_by_height: {h: hex_hash}"""
@@ -196,7 +279,11 @@ class Chain:
         return self._nonce.get(address_bytes, 0)
 
     def total_supply_so_far(self) -> int:
-        return sum(block_reward(b.height) for b in self._blocks)
+        """全网当前已发行的 BTCQ 总额（出块奖励 + 创世预分配）。"""
+        from .constants import GENESIS_ALLOCATIONS
+        block_total = sum(block_reward(b.height) for b in self._blocks)
+        genesis_total = sum(GENESIS_ALLOCATIONS.values()) if self._blocks else 0
+        return block_total + genesis_total
 
     def total_tx_count(self) -> int:
         return sum(len(b.transactions) for b in self._blocks)

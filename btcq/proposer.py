@@ -29,7 +29,10 @@ from .chain import Chain
 from .wallet import Wallet, keccak256
 from .mempool import Mempool
 from .transaction import Transaction
-from .stake import STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE, select_proposer_for_slot
+from .stake import (
+    STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE,
+    select_proposer_for_slot, select_bootstrap_proposer,
+)
 
 
 def _circuit_seed(prev_hash: bytes, slot: int, proposer_addr: bytes) -> bytes:
@@ -82,9 +85,24 @@ def _check_eligible(chain: Chain, wallet: Wallet, verbose: bool) -> int:
                 f"bootstrap：地址 {wallet.address_hex()} 已挖 {mined} 块，达到 "
                 f"{BOOTSTRAP_PER_ADDR_CAP} 上限。等转入 PoQ-Stake 后再挖（先抵押）。"
             )
+        # Issue 4：bootstrap 期也走 VRF（如果候选集非空）
+        miners_map = chain.bootstrap_miners_map()
+        stake_map = chain.stake_map()
+        expected = select_bootstrap_proposer(
+            cur_slot, miners_map, BOOTSTRAP_PER_ADDR_CAP, stake_map
+        )
+        if expected is not None and expected != addr:
+            raise RuntimeError(
+                f"bootstrap slot {cur_slot} VRF 选中的是 0x{expected.hex()}，不是你。"
+                f"等下一个 slot（候选集 {len(miners_map) + len(stake_map)} 个地址）。"
+            )
         if verbose:
-            print(f"[propose] bootstrap slot {cur_slot}（高度 {chain.height+1}/{BOOTSTRAP_OPEN_BLOCKS}，"
-                  f"你已挖 {mined}/{BOOTSTRAP_PER_ADDR_CAP}）")
+            if expected is None:
+                print(f"[propose] bootstrap slot {cur_slot}：候选集为空（首次挖矿期），开放抢占")
+            else:
+                print(f"[propose] bootstrap slot {cur_slot}：VRF 选中你（候选 "
+                      f"{len(miners_map) + len(stake_map)} 个地址中）")
+            print(f"  高度 {chain.height+1}/{BOOTSTRAP_OPEN_BLOCKS}, 你已挖 {mined}/{BOOTSTRAP_PER_ADDR_CAP}")
         return cur_slot
 
     # PoQ-Stake 期

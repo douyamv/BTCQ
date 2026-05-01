@@ -12,8 +12,14 @@ from .constants import COIN, INITIAL_BLOCK_REWARD, HALVING_INTERVAL
 
 
 def block_reward(height: int) -> int:
-    """区块奖励（原子单位）。每 HALVING_INTERVAL 减半。"""
-    halvings = height // HALVING_INTERVAL
+    """区块奖励（原子单位）。每 HALVING_INTERVAL 减半。
+
+    创世（height=0）无出块奖励（创世铭文 + Satoshi 致敬纯属预分配，不计为挖出）。
+    height=1 起每块 INITIAL_BLOCK_REWARD = 50 BTCQ。
+    """
+    if height == 0:
+        return 0
+    halvings = (height - 1) // HALVING_INTERVAL
     if halvings >= 64:
         return 0
     return INITIAL_BLOCK_REWARD >> halvings

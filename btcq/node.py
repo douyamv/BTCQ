@@ -55,12 +55,65 @@ class Node:
         self.peers: Set[str] = set(seeds or DEFAULT_SEEDS)
         self.peers_seen: Dict[str, dict] = {}
         # 双签检测（Issue 1）：(slot, proposer_addr) → set of block_hashes seen
+        # C2 修复：持久化到磁盘，重启不丢
         self._seen_proposals: Dict = {}
+        self._seen_proposals_path = self.chain_dir / "seen_proposals.json"
+        self._load_seen_proposals()
+        # C3 速率限制：(ip, route) → list of timestamps
+        self._rate_buckets: Dict = {}
         self.app = Flask(__name__)
         self._setup_routes()
         self._stop = threading.Event()
 
+    def _load_seen_proposals(self):
+        """C2: 重启后恢复双签检测状态。"""
+        if not self._seen_proposals_path.exists():
+            return
+        try:
+            data = json.loads(self._seen_proposals_path.read_text())
+            for entry in data:
+                slot = entry["slot"]
+                addr = bytes.fromhex(entry["proposer"][2:])
+                hashes = set(bytes.fromhex(h[2:]) for h in entry["hashes"])
+                self._seen_proposals[(slot, addr)] = hashes
+        except Exception:
+            pass
+
+    def _save_seen_proposals(self):
+        """C2: 持久化。仅保留最近 1000 slot 的记录避免无限增长。"""
+        from .constants import slot_at
+        import time
+        cur_slot = slot_at(int(time.time()))
+        cutoff_slot = cur_slot - 1000
+        data = []
+        for (slot, addr), hashes in self._seen_proposals.items():
+            if slot < cutoff_slot:
+                continue
+            data.append({
+                "slot": slot,
+                "proposer": "0x" + addr.hex(),
+                "hashes": ["0x" + h.hex() for h in hashes],
+            })
+        try:
+            self._seen_proposals_path.write_text(json.dumps(data, indent=2))
+        except Exception:
+            pass
+
     # ============ HTTP routes ============
+    def _rate_limit(self, ip: str, key: str, max_per_min: int) -> bool:
+        """C3: 简易速率限制。每个 (ip, route) 每分钟最多 max_per_min 次。返回 True 表示允许。"""
+        import time as _t
+        now = _t.time()
+        bucket_key = (ip, key)
+        bucket = self._rate_buckets.setdefault(bucket_key, [])
+        # 清理 60 秒前的请求
+        cutoff = now - 60
+        bucket[:] = [t for t in bucket if t > cutoff]
+        if len(bucket) >= max_per_min:
+            return False
+        bucket.append(now)
+        return True
+
     def _setup_routes(self):
         a = self.app
 
@@ -68,18 +121,31 @@ class Node:
         def info():
             head = self.chain.head
             return jsonify({
-                "version":     "v0.1.1",
-                "user_agent":  USER_AGENT,
-                "chain":       "btcq",
-                "height":      self.chain.height,
-                "head_hash":   "0x" + (head.block_hash().hex() if head else "0" * 64),
-                "n_qubits":    head.n_qubits if head else 0,
-                "depth":       head.depth if head else 0,
-                "total_supply":self.chain.total_supply_so_far(),
-                "total_stake": self.chain.total_stake(),
-                "peers":       list(self.peers),
-                "mempool_size":len(self.mempool),
-                "public_url":  self.public_url,
+                "version":      "v0.1.3",
+                "user_agent":   USER_AGENT,
+                "chain":        "btcq",
+                "height":       self.chain.height,
+                "head_hash":    "0x" + (head.block_hash().hex() if head else "0" * 64),
+                "head_slot":    head.slot if head else 0,
+                "n_qubits":     head.n_qubits if head else 0,
+                "depth":        head.depth if head else 0,
+                "total_supply": self.chain.total_supply_so_far(),
+                "total_stake":  self.chain.total_stake(),
+                "peers":        list(self.peers),
+                "mempool_size": len(self.mempool),
+                "public_url":   self.public_url,
+                "slash_count":  len(self.chain.slash_records()),
+                "total_slashed":self.chain.total_slashed(),
+            })
+
+        @a.get("/slashes")
+        def get_slashes():
+            return jsonify({
+                "records": [
+                    {"height": h, "address": "0x" + a.hex(), "amount": amt, "reason": r}
+                    for (h, a, amt, r) in self.chain.slash_records()
+                ],
+                "total_slashed": self.chain.total_slashed(),
             })
 
         @a.get("/blocks/<int:h>")
@@ -90,7 +156,11 @@ class Node:
 
         @a.get("/blocks/range/<int:a_>/<int:b>")
         def get_range(a_, b):
-            b = min(b, self.chain.height)
+            ip = request.remote_addr or "unknown"
+            if not self._rate_limit(ip, "range", 30):
+                return jsonify({"error": "rate limit"}), 429
+            # C3: 防止 /blocks/range/0/100000 一次拉爆内存，硬限单次 100 块
+            b = min(b, self.chain.height, a_ + 99)
             if a_ > b:
                 return jsonify([])
             blocks = [self.chain.get(h).to_dict() for h in range(a_, b + 1)]
@@ -104,6 +174,9 @@ class Node:
 
         @a.post("/tx")
         def post_tx():
+            ip = request.remote_addr or "unknown"
+            if not self._rate_limit(ip, "tx", 60):    # 每 IP 每分钟最多 60 笔 tx
+                return jsonify({"ok": False, "error": "rate limit"}), 429
             data = request.get_json()
             try:
                 tx = Transaction.from_dict(data)
@@ -115,6 +188,9 @@ class Node:
 
         @a.post("/block")
         def post_block():
+            ip = request.remote_addr or "unknown"
+            if not self._rate_limit(ip, "block", 30):  # 每 IP 每分钟最多 30 块（合理上限远超出块速度）
+                return jsonify({"ok": False, "error": "rate limit"}), 429
             data = request.get_json()
             try:
                 block = Block.from_dict(data)
@@ -133,11 +209,24 @@ class Node:
                         print(f"[node] ⚠️ 检测到双签！罚没 0x{block.proposer_address.hex()} {slashed/10**8:.4f} BTCQ")
                     return jsonify({"ok": False, "error": "双签检测：proposer 已被罚没"}), 400
                 seen_hashes.add(bh)
+                self._save_seen_proposals()
 
-                # ===== Issue 3: Fork choice =====
+                # ===== Bug R3 修复：竞争块即时 fork choice =====
                 if block.height <= self.chain.height:
-                    # 同/低高度的竞争块。本节点的当前链为准；如果对方链更长（通过同步发现），届时再 reorg。
-                    return jsonify({"ok": False, "error": "已有该高度区块（fork choice 在 sync 阶段处理）"}), 409
+                    my_block = self.chain.get(block.height)
+                    if my_block.block_hash() == block.block_hash():
+                        return jsonify({"ok": False, "error": "已有该区块"}), 200
+                    # 真正的竞争块：当前节点已有不同 hash 的块在该高度
+                    # 立即决定哪条链更优——但仅靠这一块信息不够，需要去 peer 拉对方完整链
+                    # v0.1.3 简化：把对方提议的"竞争块"作为 hint，等下一轮 sync 时
+                    # _sync_from_peer 会拉对方完整链做共同祖先比较。
+                    # 这里用 lower_hash_wins 做 tiebreaker 提示，但不立即切。
+                    return jsonify({
+                        "ok": False,
+                        "error": "竞争块；fork choice 将在下次 sync 周期触发",
+                        "my_hash": "0x" + my_block.block_hash().hex(),
+                        "your_hash": "0x" + block.block_hash().hex(),
+                    }), 409
                 if block.height != self.chain.height + 1:
                     return jsonify({"ok": False, "error": "高度不连续，请先同步"}), 409
 
@@ -160,6 +249,11 @@ class Node:
 
         @a.post("/peers")
         def add_peer():
+            ip = request.remote_addr or "unknown"
+            if not self._rate_limit(ip, "peers", 10):
+                return jsonify({"ok": False, "error": "rate limit"}), 429
+            if len(self.peers) >= 200:
+                return jsonify({"ok": False, "error": "peer 池已满"}), 503
             data = request.get_json() or {}
             url = data.get("url")
             if not url or not self._valid_peer_url(url):
@@ -209,9 +303,30 @@ class Node:
         """从 peer 同步缺失的区块（含 reorg）。返回应用的区块净增量。
 
         Issue 3 修复：当 peer 链更长，但与我们在某高度分叉时，找共同祖先 → 回滚 → 重放 peer 链。
+        Bug R3 修复：等高度 tiebreaker——lower head hash wins（确定性）。
         """
         peer_h = peer_info.get("height", -1)
-        if peer_h <= self.chain.height:
+        peer_head_hash = peer_info.get("head_hash", "")
+
+        # 同高度但不同 hash → tiebreaker
+        if peer_h == self.chain.height and self.chain.head:
+            my_head_hash = "0x" + self.chain.head.block_hash().hex()
+            if peer_head_hash and peer_head_hash != my_head_hash:
+                # 同高度不同链：lower hash wins（确定性 tiebreaker）
+                if peer_head_hash < my_head_hash:
+                    if self.verbose:
+                        print(f"[node] 等高度 fork-tiebreaker：peer 链 hash 更小，触发 reorg")
+                    # 找共同祖先 → 回滚 → 重放
+                    common_h = self._find_common_ancestor(url, peer_h)
+                    if common_h is not None and common_h < self.chain.height:
+                        rolled_back = self.chain.rewind_to(common_h, mempool=self.mempool)
+                        if self.verbose:
+                            print(f"[node]  回滚 {len(rolled_back)} 块到共同祖先 #{common_h}")
+                        # 拉 peer 的链
+                        return self._pull_blocks(url, common_h + 1, peer_h)
+                return 0
+            return 0
+        if peer_h < self.chain.height:
             return 0
 
         # 1. 找共同祖先：比对 peer 在 [my_height, my_height-100] 的 hash
@@ -221,13 +336,17 @@ class Node:
                 print(f"[node] 无法与 {url} 找到共同祖先，跳过")
             return 0
         if common_h < self.chain.height:
-            removed = self.chain.rewind_to(common_h)
+            rolled_back = self.chain.rewind_to(common_h, mempool=self.mempool)
+            tx_returned = sum(len(b.transactions) for b in rolled_back)
             if self.verbose:
-                print(f"[node] reorg：回滚 {removed} 块到共同祖先 #{common_h}，从 {url} 取更长的链")
+                print(f"[node] reorg：回滚 {len(rolled_back)} 块到共同祖先 #{common_h}，"
+                      f"{tx_returned} 笔交易回流 mempool，从 {url} 取更长的链")
 
-        # 2. 从 common_h+1 拉到 peer_h
-        start = common_h + 1
-        end = min(peer_h, start + 99)
+        return self._pull_blocks(url, common_h + 1, peer_h)
+
+    def _pull_blocks(self, url: str, start: int, end: int) -> int:
+        """从 url 拉 [start, end] 的区块并 append（已假定 prev 是当前 head）。"""
+        end = min(end, start + 99)
         try:
             r = requests.get(f"{url}/blocks/range/{start}/{end}",
                              timeout=PEER_TIMEOUT_SEC * 4,

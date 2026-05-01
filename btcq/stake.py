@@ -101,3 +101,38 @@ def select_proposer_for_slot(slot: int, stake_map: Dict[bytes, int]) -> bytes | 
 def select_proposer(prev_hash: bytes, height: int, stake_map: Dict[bytes, int]) -> bytes | None:
     """已废弃：v0.1.2 起 slot 取代 height 作为选举依据。请使用 select_proposer_for_slot。"""
     return select_proposer_for_slot(height, stake_map)
+
+
+def select_bootstrap_proposer(
+    slot: int,
+    bootstrap_blocks_by_addr: Dict[bytes, int],
+    bootstrap_per_addr_cap: int,
+    stake_map: Dict[bytes, int] = None,
+) -> bytes | None:
+    """Bootstrap 期 slot proposer 选举（Issue 4）。
+
+    候选集合 = (已挖过块且未达上限的矿工) ∪ (已抵押的 stakers)
+    若集合非空：用 slot 派生伪随机数选出唯一 proposer
+    若集合为空：返回 None，表示该 slot 仍为"开放挖矿"（第一个 valid 块占据）
+
+    这样设计：
+      ① 第一位矿工先 free-for-all 出块（集合空 → 开放）
+      ② 之后任何已挖过/已抵押的矿工都可参与 VRF
+      ③ 同一 slot 唯一 proposer，避免分叉
+      ④ per-addr cap 防垄断（达到上限自动出局）
+    """
+    from .wallet import keccak256
+    eligible_addrs: list = []
+    for addr, count in bootstrap_blocks_by_addr.items():
+        if count < bootstrap_per_addr_cap:
+            eligible_addrs.append(addr)
+    if stake_map:
+        for addr in stake_map:
+            if addr not in eligible_addrs:
+                eligible_addrs.append(addr)
+    if not eligible_addrs:
+        return None    # 完全开放：第一个 valid 块抢占
+    eligible_addrs.sort()
+    seed = keccak256(b"BTCQ-BOOTSTRAP-SLOT" + slot.to_bytes(8, "big"))
+    rnd = int.from_bytes(seed[:8], "big") % len(eligible_addrs)
+    return eligible_addrs[rnd]
