@@ -9,7 +9,7 @@ v0.1.1 修复：
 from __future__ import annotations
 import time
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Optional, Tuple, Union
 
 from .block import Block, compute_samples_root, compute_transactions_root
 from .chain import Chain
@@ -196,7 +196,7 @@ def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
     return True, "OK"
 
 
-def verify_chain(chain_dir: str | Path, *, recompute_xeb: bool = True) -> Tuple[bool, str]:
+def verify_chain(chain_dir: Union[str, Path], *, recompute_xeb: bool = True) -> Tuple[bool, str]:
     """全链顺序验证。用"截至 h-1 的子链"作为状态来校验交易。"""
     full_chain = Chain(chain_dir)
     if full_chain.head is None:

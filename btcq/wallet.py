@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from eth_keys import keys
 from Crypto.Hash import keccak
@@ -27,13 +27,13 @@ class Wallet:
         return cls(os.urandom(32))
 
     @classmethod
-    def load(cls, path: str | Path) -> "Wallet":
+    def load(cls, path: Union[str, Path]) -> "Wallet":
         path = Path(path)
         data = json.loads(path.read_text())
         sk = bytes.fromhex(data["private_key"])
         return cls(sk)
 
-    def save(self, path: str | Path):
+    def save(self, path: Union[str, Path]):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({
@@ -67,7 +67,7 @@ class Wallet:
         except Exception:
             return False
 
-    def sign_transaction(self, recipient: bytes | str, amount: int, nonce: int):
+    def sign_transaction(self, recipient: Union[bytes, str], amount: int, nonce: int):
         """Convenience: 签发一笔交易。"""
         # 延迟导入避免循环
         from .transaction import sign_transaction

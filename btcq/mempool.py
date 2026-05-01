@@ -6,13 +6,13 @@ v0.1 是单节点本地池。v0.5 引入 P2P 后会广播。
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Union
 
 from .transaction import Transaction
 
 
 class Mempool:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: Union[str, Path]):
         self.path = Path(path)
         self._txs: List[Transaction] = []
         self._load()

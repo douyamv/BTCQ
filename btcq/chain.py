@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 import json
 
 from .block import Block, block_reward, merkle_root
@@ -24,7 +24,7 @@ from .constants import (
 
 
 class Chain:
-    def __init__(self, data_dir: str | Path):
+    def __init__(self, data_dir: Union[str, Path]):
         self.dir = Path(data_dir)
         (self.dir / "blocks").mkdir(parents=True, exist_ok=True)
         self._blocks: List[Block] = []

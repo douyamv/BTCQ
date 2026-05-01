@@ -16,7 +16,7 @@ import time
 import threading
 import logging
 from pathlib import Path
-from typing import List, Set, Optional, Dict
+from typing import Dict, List, Optional, Set, Union
 from urllib.parse import urlparse
 
 import requests
@@ -44,7 +44,7 @@ USER_AGENT        = "btcq-node/0.1.1"
 
 
 class Node:
-    def __init__(self, chain_dir: str | Path, port: int = DEFAULT_PORT,
+    def __init__(self, chain_dir: Union[str, Path], port: int = DEFAULT_PORT,
                  seeds: List[str] = None, public_url: Optional[str] = None,
                  verbose: bool = True):
         self.chain_dir = Path(chain_dir)

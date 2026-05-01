@@ -14,7 +14,7 @@
 """
 
 from __future__ import annotations
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from .constants import MIN_STAKE, UNSTAKE_DELAY_BLOCKS
 
@@ -72,7 +72,7 @@ def is_eligible_proposer(address: bytes, stake_map: Dict[bytes, int]) -> bool:
     return stake_map.get(address, 0) >= MIN_STAKE
 
 
-def select_proposer_for_slot(slot: int, stake_map: Dict[bytes, int]) -> bytes | None:
+def select_proposer_for_slot(slot: int, stake_map: Dict[bytes, int]) -> Optional[bytes]:
     """硬时间 slot 出块人选举：基于 slot 编号派生伪随机数，按抵押权重抽签。
 
     每个 slot 唯一确定一个 proposer。slot 与 height 解耦——空 slot 不增高度。
@@ -98,7 +98,7 @@ def select_proposer_for_slot(slot: int, stake_map: Dict[bytes, int]) -> bytes | 
 
 
 # 旧 API 兼容（已废弃，仅保留向后兼容）
-def select_proposer(prev_hash: bytes, height: int, stake_map: Dict[bytes, int]) -> bytes | None:
+def select_proposer(prev_hash: bytes, height: int, stake_map: Dict[bytes, int]) -> Optional[bytes]:
     """已废弃：v0.1.2 起 slot 取代 height 作为选举依据。请使用 select_proposer_for_slot。"""
     return select_proposer_for_slot(height, stake_map)
 
@@ -108,7 +108,7 @@ def select_bootstrap_proposer(
     bootstrap_blocks_by_addr: Dict[bytes, int],
     bootstrap_per_addr_cap: int,
     stake_map: Dict[bytes, int] = None,
-) -> bytes | None:
+) -> Optional[bytes]:
     """Bootstrap 期 slot proposer 选举（Issue 4）。
 
     候选集合 = (已挖过块且未达上限的矿工) ∪ (已抵押的 stakers)

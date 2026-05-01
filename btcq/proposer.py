@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Optional, Union
 
 import numpy as np
 
@@ -127,7 +127,7 @@ def _check_eligible(chain: Chain, wallet: Wallet, verbose: bool) -> int:
     return cur_slot
 
 
-def _next_my_slot(cur_slot: int, addr: bytes, stake_map: dict, lookahead: int = 200) -> int | None:
+def _next_my_slot(cur_slot: int, addr: bytes, stake_map: dict, lookahead: int = 200) -> Optional[int]:
     """前瞻 lookahead 个 slot，返回下一个属于我的 slot 编号；找不到返回 None。"""
     for s in range(cur_slot + 1, cur_slot + 1 + lookahead):
         if select_proposer_for_slot(s, stake_map) == addr:
@@ -136,7 +136,7 @@ def _next_my_slot(cur_slot: int, addr: bytes, stake_map: dict, lookahead: int = 
 
 
 def propose_classical_simulator(
-    chain_dir: str | Path,
+    chain_dir: Union[str, Path],
     wallet: Wallet,
     n_qubits: int = CIRCUIT_N_QUBITS,
     depth: int = CIRCUIT_DEPTH,
@@ -175,7 +175,7 @@ def propose_classical_simulator(
 
 
 def propose_ibm_quantum(
-    chain_dir: str | Path,
+    chain_dir: Union[str, Path],
     wallet: Wallet,
     backend_name: str = "ibm_marrakesh",
     shots: int = CIRCUIT_N_SAMPLES,
