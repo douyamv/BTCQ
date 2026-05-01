@@ -184,6 +184,78 @@ class Node:
                 "bootstrap_blocks": self.chain.bootstrap_blocks_by(addr_bytes),
             })
 
+        @a.get("/address/<addr>/txs")
+        def get_address_txs(addr):
+            """查询地址相关交易（含出块奖励、转入/转出、抵押、罚没）。
+
+            按高度倒序，最多返回 limit 条（默认 50，硬上限 500）。
+            包含：mempool 中待打包的相关交易（标记 status=pending）。
+            """
+            try:
+                hex_str = addr[2:] if addr.startswith('0x') else addr
+                addr_bytes = bytes.fromhex(hex_str)
+                if len(addr_bytes) != 20:
+                    return jsonify({"error": "地址必须 20 字节"}), 400
+            except Exception:
+                return jsonify({"error": "地址格式错误"}), 400
+
+            try:
+                limit = max(1, min(int(request.args.get("limit", 50)), 500))
+            except Exception:
+                limit = 50
+
+            from .block import block_reward as _block_reward
+            results = []
+            # mempool 待打包
+            for t in self.mempool.all():
+                if t.sender == addr_bytes or t.recipient == addr_bytes:
+                    d = t.to_dict()
+                    d["status"] = "pending"
+                    d["height"] = None
+                    results.append(d)
+
+            # 已上链：从最高块往低扫
+            count = len(results)
+            for h in range(self.chain.height, -1, -1):
+                if count >= limit:
+                    break
+                block = self.chain.get(h)
+                # 出块奖励
+                if h > 0 and block.proposer_address == addr_bytes:
+                    results.append({
+                        "kind":     "block_reward",
+                        "status":   "confirmed",
+                        "height":   h,
+                        "slot":     block.slot,
+                        "timestamp": block.timestamp,
+                        "sender":   "0x" + ("00" * 20),
+                        "recipient":"0x" + addr_bytes.hex(),
+                        "amount":   _block_reward(h),
+                        "block_hash":"0x" + block.block_hash().hex(),
+                        "tx_hash":  "0x" + block.block_hash().hex(),
+                    })
+                    count += 1
+                # 块内交易
+                for t in block.transactions:
+                    if count >= limit:
+                        break
+                    if t.sender == addr_bytes or t.recipient == addr_bytes:
+                        d = t.to_dict()
+                        d["status"] = "confirmed"
+                        d["height"] = h
+                        d["timestamp"] = block.timestamp
+                        d["block_hash"] = "0x" + block.block_hash().hex()
+                        results.append(d)
+                        count += 1
+
+            return jsonify({
+                "address":      "0x" + addr_bytes.hex(),
+                "transactions": results[:limit],
+                "scanned_to":   max(0, self.chain.height - 0),
+                "total":        len(results),
+                "limit":        limit,
+            })
+
         @a.get("/blocks/<int:h>")
         def get_block(h):
             if h < 0 or h > self.chain.height:
