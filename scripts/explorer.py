@@ -4,7 +4,7 @@
 用法:
     python scripts/explorer.py
     python scripts/explorer.py --tail 10        # 最近 10 块详情
-    python scripts/explorer.py --remote http://localhost:8333  # 远程节点
+    python scripts/explorer.py --remote http://43.136.28.125:8333  # 远程节点
 """
 
 import sys
@@ -81,7 +81,7 @@ def from_remote(args):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--chain", default="./chain_data")
-    p.add_argument("--remote", help="远端节点 URL，例如 http://localhost:8333")
+    p.add_argument("--remote", help="远端节点 URL，例如 http://43.136.28.125:8333")
     p.add_argument("--tail", type=int, default=10)
     args = p.parse_args()
     if args.remote:

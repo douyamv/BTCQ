@@ -21,7 +21,7 @@ def cmd_add(my_url, peer_url):
     print(r.json())
 
 
-def cmd_sync(remote, local="http://localhost:8333"):
+def cmd_sync(remote, local="http://43.136.28.125:8333"):
     rem = requests.get(remote + "/info", timeout=8).json()
     loc = requests.get(local + "/info", timeout=8).json()
     print(f"远端高度 {rem['height']}, 本地高度 {loc['height']}")
@@ -43,7 +43,7 @@ def main():
     elif cmd == "add":
         cmd_add(sys.argv[2], sys.argv[3])
     elif cmd == "sync":
-        local = sys.argv[3] if len(sys.argv) > 3 else "http://localhost:8333"
+        local = sys.argv[3] if len(sys.argv) > 3 else "http://43.136.28.125:8333"
         cmd_sync(sys.argv[2], local)
     else:
         print("未知命令")

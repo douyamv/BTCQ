@@ -202,11 +202,11 @@ python scripts/mempool.py
 ### HTTP API（节点运行时）
 
 ```bash
-curl http://localhost:8333/info             # 节点状态
-curl http://localhost:8333/blocks/0         # 创世
-curl http://localhost:8333/blocks/range/1/10 # 一段区块
-curl http://localhost:8333/peers            # 已知 peer
-curl http://localhost:8333/slashes          # 罚没历史
+curl http://43.136.28.125:8333/info             # 节点状态
+curl http://43.136.28.125:8333/blocks/0         # 创世
+curl http://43.136.28.125:8333/blocks/range/1/10 # 一段区块
+curl http://43.136.28.125:8333/peers            # 已知 peer
+curl http://43.136.28.125:8333/slashes          # 罚没历史
 ```
 
 ---
@@ -228,7 +228,7 @@ python scripts/send.py --to 0xRECIPIENT_ADDR --amount 5
 
 * 检查后端在线：`curl https://api.quantum.ibm.com/...` 或 Qiskit `backend.status()`
 * Heron r2 在 n=30 d=12 应该轻松达 XEB > 1
-* 检查 difficulty target 是否过高（链状态查 `curl localhost:8333/info`）
+* 检查 difficulty target 是否过高（链状态查 `curl http://43.136.28.125:8333/info`）
 
 ### "RuntimeError: slot S 选中的是 0x...，不是你"
 
@@ -281,7 +281,7 @@ python scripts/init_chain.py
 * 长期持币用冷钱包：导出私钥 → 物理隔离设备保存
 * 节点公网部署：仅开放 8333；其他端口防火墙阻断
 * 不要在公网节点上放置大量 staked 钱包；分离"出块钱包"和"持币钱包"
-* 监控双签：`curl localhost:8333/slashes` 看是否有自家地址被罚没
+* 监控双签：`curl http://43.136.28.125:8333/slashes` 看是否有自家地址被罚没
 
 ---
 
