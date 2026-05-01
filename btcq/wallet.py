@@ -1,5 +1,7 @@
 """极简钱包：secp256k1 私钥 + Ethereum 风格地址 + 签名。"""
 
+from __future__ import annotations
+
 import os
 import json
 from pathlib import Path
