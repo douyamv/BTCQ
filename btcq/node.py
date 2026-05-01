@@ -63,6 +63,17 @@ class Node:
         # C3 速率限制：(ip, route) → list of timestamps
         self._rate_buckets: Dict = {}
         self.app = Flask(__name__)
+        # 允许跨域：官网/区块浏览器从浏览器直连 RPC 必需
+        @self.app.after_request
+        def _cors(resp):
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            return resp
+        @self.app.route('/<path:_>', methods=['OPTIONS'])
+        @self.app.route('/', methods=['OPTIONS'])
+        def _cors_preflight(_=None):
+            return ("", 204)
         self._setup_routes()
         self._stop = threading.Event()
 
