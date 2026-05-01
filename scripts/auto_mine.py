@@ -35,29 +35,40 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--interval", type=int, default=180, help="挖矿间隔秒数（默认 180 = 3 分钟）")
     p.add_argument("--backend", default="ibm_marrakesh")
-    p.add_argument("--wallet", default="wallet.json")
+    p.add_argument("--wallet", default="wallet.json",
+                   help="钱包文件路径（多个用逗号分隔，会按顺序轮换）")
     p.add_argument("--shots", type=int, default=4096)
     p.add_argument("--mode", choices=["quantum", "classical"], default="quantum")
     args = p.parse_args()
 
+    # 多钱包轮换：每次挖矿用一个，按数组顺序循环
+    wallets = [w.strip() for w in args.wallet.split(",") if w.strip()]
+    if not wallets:
+        wallets = ["wallet.json"]
+
     print(f"=" * 60)
     print(f" BTCQ 自动挖矿 · {args.mode} · 后端 {args.backend}")
-    print(f" 间隔 {args.interval} 秒  钱包 {args.wallet}")
+    print(f" 间隔 {args.interval} 秒  钱包数 {len(wallets)}（轮换）")
+    for i, w in enumerate(wallets):
+        print(f"   [{i}] {w}")
     print(f"=" * 60)
     print(" 按 Ctrl+C 停止\n")
 
     blocks_mined = 0
     failures = 0
     started_at = time.time()
+    cycle = 0
 
     while True:
         loop_start = time.time()
         ts = datetime.now().strftime("%H:%M:%S")
-        print(f"[{ts}] 第 {blocks_mined + failures + 1} 次尝试...")
+        wallet = wallets[cycle % len(wallets)]
+        cycle += 1
+        print(f"[{ts}] 第 {blocks_mined + failures + 1} 次尝试 · 钱包 {Path(wallet).name}")
         try:
             cmd = ["python3", "scripts/propose.py",
                    f"--{args.mode}",
-                   "--wallet", args.wallet,
+                   "--wallet", wallet,
                    "--shots", str(args.shots)]
             if args.mode == "quantum":
                 cmd.extend(["--backend", args.backend])
