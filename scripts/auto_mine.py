@@ -23,12 +23,48 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def _notify_nodes(ports=(8333, 8334)):
-    """挖矿完成后让节点重新读盘。"""
+    """挖矿完成后让本地节点重新读盘。"""
     for port in ports:
         try:
-            urllib.request.urlopen(f"http://localhost:{port}/reload", timeout=2)
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/reload", timeout=2)
         except Exception:
             pass    # 节点可能未运行
+
+
+def _push_block_to_remotes(chain_dir: Path, urls):
+    """挖矿成功后把最新区块直接 POST 给远程节点。
+
+    本机 NAT 下后台广播触不到 push 路径（远程不会主动连本机）。
+    所以挖完直接 POST，确保远程链同步。
+    """
+    if not urls:
+        return
+    latest = chain_dir / "blocks" / "latest.json"
+    if not latest.exists():
+        return
+    try:
+        block_data = _json.loads(latest.read_text())
+    except Exception as e:
+        print(f"  ⚠️ 读取 latest.json 失败: {e}")
+        return
+    payload = _json.dumps(block_data).encode()
+    for url in urls:
+        url = url.rstrip("/")
+        try:
+            req = urllib.request.Request(
+                f"{url}/block",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = resp.read().decode()
+                if '"ok": true' in body or '"ok":true' in body:
+                    print(f"  → 已推送到 {url}")
+                else:
+                    print(f"  ⚠️ {url} 拒绝: {body[:150]}")
+        except Exception as e:
+            print(f"  ⚠️ 推送 {url} 失败: {e}")
 
 
 def main():
@@ -39,7 +75,12 @@ def main():
                    help="钱包文件路径（多个用逗号分隔，会按顺序轮换）")
     p.add_argument("--shots", type=int, default=4096)
     p.add_argument("--mode", choices=["quantum", "classical"], default="quantum")
+    p.add_argument("--push-to", default="",
+                   help="挖矿成功后把新区块推送到这些节点，逗号分隔（例：http://43.136.28.125:8333）")
+    p.add_argument("--chain", default="./chain_data", help="链数据目录")
     args = p.parse_args()
+    push_urls = [u.strip() for u in args.push_to.split(",") if u.strip()]
+    chain_dir = Path(args.chain).resolve()
 
     # 多钱包轮换：每次挖矿用一个，按数组顺序循环
     wallets = [w.strip() for w in args.wallet.split(",") if w.strip()]
@@ -51,6 +92,10 @@ def main():
     print(f" 间隔 {args.interval} 秒  钱包数 {len(wallets)}（轮换）")
     for i, w in enumerate(wallets):
         print(f"   [{i}] {w}")
+    if push_urls:
+        print(f" 出块后推送到：")
+        for u in push_urls:
+            print(f"   → {u}")
     print(f"=" * 60)
     print(" 按 Ctrl+C 停止\n")
 
@@ -79,8 +124,10 @@ def main():
                 for line in r.stdout.splitlines():
                     if "高度" in line or "XEB" in line:
                         print(f"  {line.strip()}")
-                # 挖矿写在 chain_data，但节点内存缓存不会自动刷新——通知节点重新加载
+                # 挖矿写在 chain_data，但节点内存缓存不会自动刷新——通知本地节点重读
                 _notify_nodes()
+                # 直接推送到远程节点（本机 NAT 后无法被回连）
+                _push_block_to_remotes(chain_dir, push_urls)
                 runtime = (time.time() - started_at) / 60
                 print(f"[{ts}] ✅ 累计 {blocks_mined} 块，运行 {runtime:.1f} 分钟，失败 {failures} 次\n")
             else:
