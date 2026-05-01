@@ -19,7 +19,7 @@ import numpy as np
 
 from .constants import (
     PROTOCOL_VERSION, CIRCUIT_N_QUBITS, CIRCUIT_DEPTH, CIRCUIT_N_SAMPLES,
-    MIN_STAKE, BOOTSTRAP_OPEN_BLOCKS, BOOTSTRAP_PER_ADDR_CAP,
+    MIN_STAKE, BOOTSTRAP_OPEN_BLOCKS, BOOTSTRAP_PER_ADDR_CAP, COIN,
     slot_at, slot_start_timestamp, slot_duration_at, GENESIS_TIMESTAMP,
 )
 from .circuit import build_circuit_description, to_qiskit, simulate_statevector, amplitudes_for_samples
@@ -109,7 +109,7 @@ def _check_eligible(chain: Chain, wallet: Wallet, verbose: bool) -> int:
     s = chain.staked_of(addr)
     if s < MIN_STAKE:
         raise RuntimeError(
-            f"抵押 {s/10**8:.4f} BTCQ < 最低 {MIN_STAKE/10**8:.4f} BTCQ。先用 scripts/stake.py 抵押。"
+            f"抵押 {s/COIN:.4f} BTCQ < 最低 {MIN_STAKE/COIN:.4f} BTCQ。先用 scripts/stake.py 抵押。"
         )
     stake_map = chain.stake_map()
     expected = select_proposer_for_slot(cur_slot, stake_map)
@@ -123,7 +123,7 @@ def _check_eligible(chain: Chain, wallet: Wallet, verbose: bool) -> int:
             + (f" 你下一个 slot 估计是 {next_my_slot}（约 {wait}s 后）。" if next_my_slot else "")
         )
     if verbose:
-        print(f"[propose] ✓ slot {cur_slot}: 你被 VRF 选中（抵押 {s/10**8:.4f} BTCQ）")
+        print(f"[propose] ✓ slot {cur_slot}: 你被 VRF 选中（抵押 {s/COIN:.4f} BTCQ）")
     return cur_slot
 
 
@@ -330,6 +330,6 @@ def _finalize_block(chain, wallet, prev_hash, head, height, slot, n_qubits, dept
         print(f"   哈希:    0x{block.block_hash().hex()}")
         print(f"   出块人:  {wallet.address_hex()}")
         print(f"   XEB:     {f_xeb:.4f}")
-        print(f"   奖励:    {block_reward(block.height)/10**8:.0f} BTCQ")
+        print(f"   奖励:    {block_reward(block.height)/COIN:.0f} BTCQ")
         print(f"   交易:    {len(txs)} 笔已打包")
     return block

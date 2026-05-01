@@ -64,27 +64,27 @@ ECOSYSTEM_FAUCET_ADDR = _tribute_addr(
     "BTCQ ecosystem faucet - early adopters, bounties, community grants."
 )
 
+# === 经济模型（精度 18 位，对齐 Ethereum） ===
+COIN                   = 10**18            # 1 BTCQ = 10^18 atomic units (wei-like)
+TOTAL_SUPPLY           = 21_000_000 * COIN # 总量上限：21,000,000 BTCQ
+INITIAL_BLOCK_REWARD   = 50 * COIN         # 创世后第 1 块奖励：50 BTCQ
+HALVING_INTERVAL       = 210_000           # 每 210,000 块减半一次（≈ 4 年）
+
 GENESIS_ALLOCATIONS = {
-    SATOSHI_TRIBUTE_ADDR:   50 * 10**8,    # 50 BTCQ — Bitcoin 创造者
-    VITALIK_TRIBUTE_ADDR:   25 * 10**8,    # 25 BTCQ — Ethereum 创造者
-    HAL_TRIBUTE_ADDR:       10 * 10**8,    # 10 BTCQ — 早期 Bitcoin 工程
-    NICK_TRIBUTE_ADDR:      10 * 10**8,    # 10 BTCQ — 智能合约前身
-    CHAUM_TRIBUTE_ADDR:     10 * 10**8,    # 10 BTCQ — 加密货币之父
-    WEIDAI_TRIBUTE_ADDR:    10 * 10**8,    # 10 BTCQ — b-money
-    SHOR_TRIBUTE_ADDR:      25 * 10**8,    # 25 BTCQ — Shor 算法
-    PRESKILL_TRIBUTE_ADDR:  10 * 10**8,    # 10 BTCQ — NISQ 命名
-    ECOSYSTEM_FAUCET_ADDR: 100 * 10**8,    # 100 BTCQ — 生态运营，早期 staker 启动金
+    SATOSHI_TRIBUTE_ADDR:   50 * COIN,     # 50 BTCQ — Bitcoin 创造者
+    VITALIK_TRIBUTE_ADDR:   25 * COIN,     # 25 BTCQ — Ethereum 创造者
+    HAL_TRIBUTE_ADDR:       10 * COIN,     # 10 BTCQ — 早期 Bitcoin 工程
+    NICK_TRIBUTE_ADDR:      10 * COIN,     # 10 BTCQ — 智能合约前身
+    CHAUM_TRIBUTE_ADDR:     10 * COIN,     # 10 BTCQ — 加密货币之父
+    WEIDAI_TRIBUTE_ADDR:    10 * COIN,     # 10 BTCQ — b-money
+    SHOR_TRIBUTE_ADDR:      25 * COIN,     # 25 BTCQ — Shor 算法
+    PRESKILL_TRIBUTE_ADDR:  10 * COIN,     # 10 BTCQ — NISQ 命名
+    ECOSYSTEM_FAUCET_ADDR: 100 * COIN,     # 100 BTCQ — 生态运营，早期 staker 启动金
 }
 # 总计：250 BTCQ 创世预分配（其中 150 BTCQ 永久纪念锁定，100 BTCQ 生态运营）
 
 # 兼容老接口
 SATOSHI_TRIBUTE_AMOUNT = GENESIS_ALLOCATIONS[SATOSHI_TRIBUTE_ADDR]
-
-# === 经济模型（完全照搬 Bitcoin） ===
-COIN                   = 10**8             # 1 BTCQ = 10^8 atomic units (sat-like)
-TOTAL_SUPPLY           = 21_000_000 * COIN # 总量上限：21,000,000 BTCQ
-INITIAL_BLOCK_REWARD   = 50 * COIN         # 创世后第 1 块奖励：50 BTCQ
-HALVING_INTERVAL       = 210_000           # 每 210,000 块减半一次（≈ 4 年）
 
 # === 出块节奏：硬时间 slot（Ethereum 式） ===
 # Slot 是协议级"出块时机"概念：

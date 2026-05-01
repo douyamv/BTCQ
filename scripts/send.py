@@ -5,7 +5,7 @@
     python scripts/send.py --to 0xRECIPIENT --amount 5
     python scripts/send.py --to 0xRECIPIENT --amount 0.5 --wallet alice.json
 
-amount 单位是 QXEB（小数允许，最多 8 位）。
+amount 单位是 BTCQ（小数允许，最多 8 位）。
 """
 
 import sys
@@ -21,18 +21,19 @@ from btcq.constants import COIN
 
 
 def parse_amount(s: str) -> int:
-    """'5' 或 '0.5' → 原子单位整数"""
+    """'5' 或 '0.5' → 原子单位整数（按 COIN 精度补齐）。"""
+    decimals = len(str(COIN)) - 1
     if "." in s:
         whole, frac = s.split(".")
-        frac = (frac + "0" * 8)[:8]
-        return int(whole) * COIN + int(frac)
+        frac = (frac + "0" * decimals)[:decimals]
+        return int(whole or "0") * COIN + int(frac or "0")
     return int(s) * COIN
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--to", required=True, help="收款方地址 (0x...)")
-    p.add_argument("--amount", required=True, help="金额（QXEB）")
+    p.add_argument("--amount", required=True, help="金额（BTCQ）")
     p.add_argument("--wallet", default="wallet.json")
     p.add_argument("--chain", default="./chain_data")
     p.add_argument("--mempool", default="./chain_data/mempool.json")
@@ -53,7 +54,7 @@ def main():
     amount = parse_amount(args.amount)
     bal = chain.balance_of(wallet.address_bytes)
     if bal < amount:
-        print(f"❌ 余额不足：你有 {bal/COIN} QXEB，要发 {amount/COIN} QXEB")
+        print(f"❌ 余额不足：你有 {bal/COIN} BTCQ，要发 {amount/COIN} BTCQ")
         sys.exit(1)
 
     nonce = chain.nonce_of(wallet.address_bytes) + sum(
@@ -66,7 +67,7 @@ def main():
     print(f"   tx_hash:   0x{tx.tx_hash().hex()}")
     print(f"   from:      {wallet.address_hex()}")
     print(f"   to:        0x{recipient.hex()}")
-    print(f"   amount:    {amount/COIN} QXEB")
+    print(f"   amount:    {amount/COIN} BTCQ")
     print(f"   nonce:     {nonce}")
     print(f"   mempool 中待打包交易数: {len(mempool)}")
     print()

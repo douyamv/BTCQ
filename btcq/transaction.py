@@ -17,6 +17,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .wallet import keccak256, Wallet
+from .constants import TOTAL_SUPPLY
+
+# 序列化里 amount 占 16 字节 = 2^128 - 1。保险起见按总量上限再放宽 100 倍
+# 设为 100 × TOTAL_SUPPLY（≈ 2.1 × 10^17 atomic），任何合法 tx 不会超过
+MAX_TX_AMOUNT = 100 * TOTAL_SUPPLY
+ALLOWED_KINDS = {"transfer", "stake", "unstake"}
 
 
 @dataclass
@@ -28,6 +34,26 @@ class Transaction:
     kind:      str = "transfer"   # 'transfer' / 'stake' / 'unstake'
     signature: bytes = b""  # 65 字节 (r || s || v)，签名前为空
 
+    def __post_init__(self):
+        # 字段类型 / 范围检查（防止恶意输入触发 overflow / 序列化崩）
+        if not isinstance(self.amount, int) or isinstance(self.amount, bool):
+            raise ValueError("amount 必须是整数")
+        if self.amount < 0:
+            raise ValueError("amount 不能为负")
+        if self.amount > MAX_TX_AMOUNT:
+            raise ValueError(f"amount 超出最大值 {MAX_TX_AMOUNT}")
+        if not isinstance(self.nonce, int) or isinstance(self.nonce, bool):
+            raise ValueError("nonce 必须是整数")
+        if self.nonce < 0 or self.nonce >= (1 << 64):
+            raise ValueError("nonce 越界 [0, 2^64)")
+        if len(self.sender) != 20 or len(self.recipient) != 20:
+            raise ValueError("地址必须 20 字节")
+        if self.kind not in ALLOWED_KINDS:
+            raise ValueError(f"未知 kind: {self.kind}")
+        kind_bytes = self.kind.encode()
+        if len(kind_bytes) > 32:
+            raise ValueError("kind 名称过长")
+
     # ===== 序列化 =====
     def unsigned_bytes(self) -> bytes:
         """规范化字节串，用于 hash + 签名。不含 signature。"""
@@ -35,7 +61,7 @@ class Transaction:
         return b"".join([
             self.sender,
             self.recipient,
-            self.amount.to_bytes(16, "big"),    # 最多 2^128
+            self.amount.to_bytes(16, "big"),    # 最多 2^128（已在 __post_init__ 限制）
             self.nonce.to_bytes(8, "big"),
             len(kind_bytes).to_bytes(1, "big"),
             kind_bytes,

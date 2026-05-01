@@ -22,10 +22,12 @@ from btcq.stake import STAKE_VAULT, TX_STAKE, TX_UNSTAKE
 
 
 def parse_amount(s: str) -> int:
+    """解析 'X.Y' 格式的 BTCQ 金额为 atomic 整数（按 COIN 精度补齐/截断）。"""
+    decimals = len(str(COIN)) - 1     # COIN = 10**N → N 位小数
     if "." in s:
         whole, frac = s.split(".")
-        frac = (frac + "0" * 8)[:8]
-        return int(whole) * COIN + int(frac)
+        frac = (frac + "0" * decimals)[:decimals]
+        return int(whole or "0") * COIN + int(frac or "0")
     return int(s) * COIN
 
 

@@ -27,6 +27,7 @@ from .chain import Chain
 from .mempool import Mempool
 from .transaction import Transaction
 from .verifier import verify_block
+from .constants import COIN
 
 logger = logging.getLogger("btcq.node")
 
@@ -288,7 +289,7 @@ class Node:
             data = request.get_json()
             try:
                 tx = Transaction.from_dict(data)
-                self.mempool.add(tx)
+                self.mempool.add(tx, chain=self.chain)
                 self._broadcast("/tx", data, exclude=request.remote_addr)
                 return jsonify({"ok": True, "tx_hash": "0x" + tx.tx_hash().hex()})
             except Exception as e:
@@ -314,7 +315,7 @@ class Node:
                         f"双签于 slot {block.slot}：原 {next(iter(seen_hashes)).hex()[:16]} vs 新 {bh.hex()[:16]}"
                     )
                     if self.verbose:
-                        print(f"[node] ⚠️ 检测到双签！罚没 0x{block.proposer_address.hex()} {slashed/10**8:.4f} BTCQ")
+                        print(f"[node] ⚠️ 检测到双签！罚没 0x{block.proposer_address.hex()} {slashed/COIN:.4f} BTCQ")
                     return jsonify({"ok": False, "error": "双签检测：proposer 已被罚没"}), 400
                 seen_hashes.add(bh)
                 self._save_seen_proposals()

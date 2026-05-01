@@ -21,8 +21,8 @@ def main():
     chain = Chain("./chain_data")
     bal = chain.balance_of(addr_bytes)
     print(f"地址:    0x{addr}")
-    print(f"余额:    {bal / COIN:.8f} QXEB")
-    print(f"已挖出:  {chain.total_supply_so_far() / COIN:.8f} / 21,000,000 QXEB")
+    print(f"余额:    {bal / COIN:.8f} BTCQ")
+    print(f"已挖出:  {chain.total_supply_so_far() / COIN:.8f} / 21,000,000 BTCQ")
     print(f"链高度:  {chain.height}")
 
 
