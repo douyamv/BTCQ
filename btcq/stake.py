@@ -72,18 +72,22 @@ def is_eligible_proposer(address: bytes, stake_map: Dict[bytes, int]) -> bool:
     return stake_map.get(address, 0) >= MIN_STAKE
 
 
-def select_proposer(prev_hash: bytes, height: int, stake_map: Dict[bytes, int]) -> bytes | None:
-    """VRF-style 出块人选举：基于 prev_hash + height 派生伪随机数，按抵押权重抽签。
+def select_proposer_for_slot(slot: int, stake_map: Dict[bytes, int]) -> bytes | None:
+    """硬时间 slot 出块人选举：基于 slot 编号派生伪随机数，按抵押权重抽签。
 
-    v0.1 用 keccak 当 VRF（足够确定 + 无偏见，但不是真 VRF — 缺少不可预测性证明）。
-    v0.5 会换成 Schnorr-VRF。
+    每个 slot 唯一确定一个 proposer。slot 与 height 解耦——空 slot 不增高度。
+    v0.1 用 keccak 当 VRF（确定性 + 无偏，但不是真 VRF — 缺少不可预测性证明）。
+    v0.5 升级 Schnorr-VRF。
     """
     from .wallet import keccak256
-    eligible = [(a, s) for a, s in stake_map.items() if s >= MIN_STAKE]
+    eligible = sorted(
+        [(a, s) for a, s in stake_map.items() if s >= MIN_STAKE],
+        key=lambda x: x[0],   # 按地址排序，保证所有节点结果一致
+    )
     if not eligible:
         return None
     total = sum(s for _, s in eligible)
-    seed = keccak256(prev_hash + height.to_bytes(8, "big"))
+    seed = keccak256(b"BTCQ-VRF-SLOT" + slot.to_bytes(8, "big"))
     rnd = int.from_bytes(seed[:8], "big") % total
     cum = 0
     for addr, s in eligible:
@@ -91,3 +95,9 @@ def select_proposer(prev_hash: bytes, height: int, stake_map: Dict[bytes, int]) 
         if rnd < cum:
             return addr
     return eligible[-1][0]
+
+
+# 旧 API 兼容（已废弃，仅保留向后兼容）
+def select_proposer(prev_hash: bytes, height: int, stake_map: Dict[bytes, int]) -> bytes | None:
+    """已废弃：v0.1.2 起 slot 取代 height 作为选举依据。请使用 select_proposer_for_slot。"""
+    return select_proposer_for_slot(height, stake_map)

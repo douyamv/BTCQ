@@ -27,9 +27,13 @@ class Chain:
         self.dir = Path(data_dir)
         (self.dir / "blocks").mkdir(parents=True, exist_ok=True)
         self._blocks: List[Block] = []
-        # === 增量缓存 ===
+        # === 增量缓存（O(1) 查询） ===
         # 抵押映射：address -> currently active stake (atomic)
         self._stake_map: Dict[bytes, int] = {}
+        # 流动余额：address -> liquid balance (atomic)
+        self._balance: Dict[bytes, int] = {}
+        # 账户 nonce：address -> next nonce
+        self._nonce: Dict[bytes, int] = {}
         # 待释放冷却：[(release_height, address, amount)]
         self._cooling: List[Tuple[int, bytes, int]] = []
         # 每个地址的 bootstrap 期出块数（防垄断）
@@ -51,11 +55,27 @@ class Chain:
 
     def _update_state_caches(self, block: Block):
         """append/load 时增量更新所有状态缓存。O(交易数)。"""
-        # 1. 释放已到期的冷却
-        self._cooling = [(h, a, amt) for (h, a, amt) in self._cooling if h > block.height]
-        # 2. 处理交易对 stake_map 的影响
+        # 1. 释放已到期的冷却（资金回流流动余额）
+        still_cooling = []
+        for (h, a, amt) in self._cooling:
+            if h <= block.height:
+                self._balance[a] = self._balance.get(a, 0) + amt
+            else:
+                still_cooling.append((h, a, amt))
+        self._cooling = still_cooling
+
+        # 2. 出块奖励
+        if block.height > 0:
+            from .block import block_reward
+            self._balance[block.proposer_address] = self._balance.get(block.proposer_address, 0) + block_reward(block.height)
+
+        # 3. 交易状态变化
         for tx in block.transactions:
-            if tx.kind == "stake":
+            if tx.kind == "transfer":
+                self._balance[tx.sender]    = self._balance.get(tx.sender, 0) - tx.amount
+                self._balance[tx.recipient] = self._balance.get(tx.recipient, 0) + tx.amount
+            elif tx.kind == "stake":
+                self._balance[tx.sender]   = self._balance.get(tx.sender, 0) - tx.amount
                 self._stake_map[tx.sender] = self._stake_map.get(tx.sender, 0) + tx.amount
             elif tx.kind == "unstake":
                 cur = self._stake_map.get(tx.sender, 0)
@@ -64,7 +84,9 @@ class Chain:
                     if self._stake_map[tx.sender] == 0:
                         del self._stake_map[tx.sender]
                     self._cooling.append((block.height + UNSTAKE_DELAY_BLOCKS, tx.sender, tx.amount))
-        # 3. bootstrap 期 per-address 出块数
+            self._nonce[tx.sender] = self._nonce.get(tx.sender, 0) + 1
+
+        # 4. bootstrap 期 per-address 出块数
         if block.height > 0 and block.height <= BOOTSTRAP_OPEN_BLOCKS:
             self._bootstrap_blocks_by_addr[block.proposer_address] = \
                 self._bootstrap_blocks_by_addr.get(block.proposer_address, 0) + 1
@@ -89,37 +111,10 @@ class Chain:
         (self.dir / "blocks" / "latest.json").write_text(
             json.dumps(block.to_dict(), indent=2, ensure_ascii=False))
 
-    # ====== 经济 ======
+    # ====== 经济（O(1) 增量缓存） ======
     def balance_of(self, address_bytes: bytes) -> int:
-        """流动余额（不含正在抵押与冷却中的金额）。
-
-        转账：sender -= amount, recipient += amount
-        抵押 (stake)：sender -= amount（钱被锁进金库；记入 staked_of）
-        解抵押 (unstake)：发起当下不影响余额；
-            等到 height + UNSTAKE_DELAY_BLOCKS 时金额回到 sender 的流动余额
-        出块奖励：proposer += block_reward
-        """
-        from .constants import UNSTAKE_DELAY_BLOCKS
-        total = 0
-        current_h = self.height
-        for b in self._blocks:
-            if b.proposer_address == address_bytes:
-                total += block_reward(b.height)
-            for tx in b.transactions:
-                if tx.kind == "transfer":
-                    if tx.sender == address_bytes:
-                        total -= tx.amount
-                    if tx.recipient == address_bytes:
-                        total += tx.amount
-                elif tx.kind == "stake":
-                    if tx.sender == address_bytes:
-                        total -= tx.amount    # 锁进抵押池
-                elif tx.kind == "unstake":
-                    if tx.sender == address_bytes:
-                        # 已度过冷却期？
-                        if b.height + UNSTAKE_DELAY_BLOCKS <= current_h:
-                            total += tx.amount
-        return total
+        """O(1)：从增量缓存读取流动余额（不含正在抵押与冷却中的金额）。"""
+        return self._balance.get(address_bytes, 0)
 
     def staked_of(self, address_bytes: bytes) -> int:
         """O(1)：从增量缓存读取当前活跃抵押额。"""
@@ -160,13 +155,45 @@ class Chain:
     def slash_records(self) -> list:
         return list(self._slash_records)
 
-    def nonce_of(self, address_bytes: bytes) -> int:
-        n = 0
+    # ====== Reorg / Fork choice 支持（Issue 3） ======
+    def rewind_to(self, target_height: int) -> int:
+        """回滚链到指定高度。删除其后的区块文件，重建状态缓存。返回回滚的块数。"""
+        if target_height >= self.height:
+            return 0
+        if target_height < 0:
+            target_height = 0
+        removed = 0
+        for h in range(target_height + 1, self.height + 1):
+            f = self.dir / "blocks" / f"{h:08d}.json"
+            if f.exists():
+                f.unlink()
+            removed += 1
+        # 截断 + 重建状态缓存
+        self._blocks = self._blocks[:target_height + 1]
+        self._stake_map.clear()
+        self._balance.clear()
+        self._nonce.clear()
+        self._cooling.clear()
+        self._bootstrap_blocks_by_addr.clear()
         for b in self._blocks:
-            for tx in b.transactions:
-                if tx.sender == address_bytes:
-                    n += 1
-        return n
+            self._update_state_caches(b)
+        # 刷新 latest 软链
+        if self._blocks:
+            (self.dir / "blocks" / "latest.json").write_text(
+                json.dumps(self._blocks[-1].to_dict(), indent=2, ensure_ascii=False))
+        return removed
+
+    def find_common_ancestor_height(self, peer_blocks_by_height: dict) -> int:
+        """从顶部向下找与对方链的最高共同祖先。peer_blocks_by_height: {h: hex_hash}"""
+        for h in range(min(self.height, max(peer_blocks_by_height.keys() or [0])), -1, -1):
+            my_hash = "0x" + self._blocks[h].block_hash().hex()
+            if peer_blocks_by_height.get(h) == my_hash:
+                return h
+        return 0   # 至少创世共同
+
+    def nonce_of(self, address_bytes: bytes) -> int:
+        """O(1)：从增量缓存读取地址下一笔交易应使用的 nonce。"""
+        return self._nonce.get(address_bytes, 0)
 
     def total_supply_so_far(self) -> int:
         return sum(block_reward(b.height) for b in self._blocks)

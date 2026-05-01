@@ -17,11 +17,13 @@ from .circuit import build_circuit_description, simulate_statevector, amplitudes
 from .xeb import linear_xeb, linear_xeb_from_probs
 from .wallet import Wallet, keccak256
 from .transaction import Transaction
-from .stake import STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE, select_proposer
+from .stake import STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE, select_proposer_for_slot
 from .constants import (
     PROTOCOL_VERSION, CIRCUIT_N_QUBITS, CIRCUIT_DEPTH,
     XEB_FLOAT_TOL, TIMESTAMP_FUTURE_TOL,
     BOOTSTRAP_OPEN_BLOCKS, BOOTSTRAP_PER_ADDR_CAP, MIN_STAKE,
+    SLOT_FUTURE_TOL, SLOT_TIMESTAMP_TOL,
+    slot_at, slot_start_timestamp,
 )
 
 
@@ -94,11 +96,27 @@ def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
     # 3. 链接
     if block.prev_hash != prev.block_hash():
         return False, "prev_hash 与上一区块哈希不匹配"
-    # 4. 时间戳
+    # 4. 时间戳：单调递增 + 不超本地钟太多（三道防线之三）
     if block.timestamp <= prev.timestamp:
         return False, "时间戳早于上一区块"
     if block.timestamp > int(time.time()) + TIMESTAMP_FUTURE_TOL:
-        return False, "时间戳超前过多"
+        return False, "时间戳超前过多（>2 小时）"
+
+    # 4b. Slot 严格递增（防止同一 slot 多区块）—— 这是 slot 设计的核心不变量
+    #     允许跳号（空 slot），但绝对不能并列或倒退
+    if block.slot <= prev.slot:
+        return False, f"slot {block.slot} ≤ 上一区块 slot {prev.slot}（slot 必须严格递增）"
+    # 4c. block.slot 与 timestamp 大致一致（允许 SLOT_FUTURE_TOL 个 slot 漂移）
+    derived_slot = slot_at(block.timestamp)
+    if abs(block.slot - derived_slot) > SLOT_FUTURE_TOL:
+        return False, (f"block.slot={block.slot} 与 timestamp 算出的 slot={derived_slot} 偏差超 "
+                       f"{SLOT_FUTURE_TOL} 个 slot")
+    # 4d. block.timestamp 落在 slot 时间窗 ± 容差（loose 容差兼容慢链/慢算）
+    slot_start = slot_start_timestamp(block.slot)
+    slot_end = slot_start_timestamp(block.slot + 1)
+    if not (slot_start - SLOT_TIMESTAMP_TOL <= block.timestamp <= slot_end + SLOT_TIMESTAMP_TOL):
+        return False, (f"block.timestamp={block.timestamp} 距 slot {block.slot} 时间窗 "
+                       f"[{slot_start}, {slot_end}] 偏差超 {SLOT_TIMESTAMP_TOL}s")
     # 5. 难度
     if abs(block.difficulty - expected_difficulty) > 1e-9:
         return False, f"难度不匹配: {block.difficulty} != {expected_difficulty}"
@@ -124,7 +142,7 @@ def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
     if not Wallet.verify(block.block_hash(), block.proposer_signature, block.proposer_address):
         return False, "出块人签名无效"
 
-    # 8b. 共识层资格检查（PoQ-Stake 核心）
+    # 8b. 共识层资格检查（PoQ-Stake 核心，第二道防线）
     if chain_state is not None:
         if block.height <= BOOTSTRAP_OPEN_BLOCKS:
             # bootstrap 期：开放挖矿，但单地址有上限
@@ -133,20 +151,21 @@ def verify_block(block: Block, prev: Block, expected_difficulty: float, *,
                 return False, (f"bootstrap 期 {block.proposer_address.hex()} 已挖 "
                                f"{mined_so_far} 块，达到 {BOOTSTRAP_PER_ADDR_CAP} 上限")
         else:
-            # PoQ-Stake 期：必须是 VRF 选中的出块人
+            # PoQ-Stake 期：必须是当前 slot 的 VRF proposer
             stake_map = chain_state.stake_map()
             if stake_map.get(block.proposer_address, 0) < MIN_STAKE:
-                return False, f"出块人 {block.proposer_address.hex()} 抵押不足"
-            expected = select_proposer(block.prev_hash, block.height, stake_map)
+                return False, f"出块人 0x{block.proposer_address.hex()} 抵押不足"
+            expected = select_proposer_for_slot(block.slot, stake_map)
             if expected is None:
-                return False, "全网无合格 staker，链卡死"
+                return False, "全网无合格 staker"
             if block.proposer_address != expected:
-                return False, (f"非本 slot 选中的出块人：期望 0x{expected.hex()}，"
-                               f"实际 0x{block.proposer_address.hex()}")
+                return False, (f"slot {block.slot} 提议人不匹配："
+                               f"期望 0x{expected.hex()}，实际 0x{block.proposer_address.hex()}")
 
     # 9. 重算电路 + XEB（最贵的一步，可选）
     if recompute_xeb:
-        seed = keccak256(block.prev_hash + block.height.to_bytes(8, "big") + block.proposer_address)
+        # seed 现在用 slot（不是 height），与 proposer 端一致
+        seed = keccak256(block.prev_hash + block.slot.to_bytes(8, "big") + block.proposer_address)
         desc = build_circuit_description(seed, block.n_qubits, block.depth)
         probs = amplitudes_for_samples(desc, block.samples)
         f_xeb = linear_xeb_from_probs(probs, block.n_qubits)

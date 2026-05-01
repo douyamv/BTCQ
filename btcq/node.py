@@ -48,12 +48,14 @@ class Node:
                  verbose: bool = True):
         self.chain_dir = Path(chain_dir)
         self.port = port
-        self.public_url = public_url    # 自报的 URL（可被其他 peer 反向连接）
+        self.public_url = public_url
         self.verbose = verbose
         self.chain = Chain(self.chain_dir)
         self.mempool = Mempool(self.chain_dir / "mempool.json")
         self.peers: Set[str] = set(seeds or DEFAULT_SEEDS)
-        self.peers_seen: Dict[str, dict] = {}  # url → {last_seen, height}
+        self.peers_seen: Dict[str, dict] = {}
+        # 双签检测（Issue 1）：(slot, proposer_addr) → set of block_hashes seen
+        self._seen_proposals: Dict = {}
         self.app = Flask(__name__)
         self._setup_routes()
         self._stop = threading.Event()
@@ -116,10 +118,29 @@ class Node:
             data = request.get_json()
             try:
                 block = Block.from_dict(data)
+                # ===== Issue 1: 双签检测 → 罚没 =====
+                key = (block.slot, block.proposer_address)
+                seen_hashes = self._seen_proposals.setdefault(key, set())
+                bh = block.block_hash()
+                if seen_hashes and bh not in seen_hashes:
+                    # 同 (slot, proposer) 但不同区块哈希 → 双签
+                    slashed = self.chain.slash(
+                        block.proposer_address,
+                        block.height,
+                        f"双签于 slot {block.slot}：原 {next(iter(seen_hashes)).hex()[:16]} vs 新 {bh.hex()[:16]}"
+                    )
+                    if self.verbose:
+                        print(f"[node] ⚠️ 检测到双签！罚没 0x{block.proposer_address.hex()} {slashed/10**8:.4f} BTCQ")
+                    return jsonify({"ok": False, "error": "双签检测：proposer 已被罚没"}), 400
+                seen_hashes.add(bh)
+
+                # ===== Issue 3: Fork choice =====
                 if block.height <= self.chain.height:
-                    return jsonify({"ok": False, "error": "已有该高度区块"}), 409
+                    # 同/低高度的竞争块。本节点的当前链为准；如果对方链更长（通过同步发现），届时再 reorg。
+                    return jsonify({"ok": False, "error": "已有该高度区块（fork choice 在 sync 阶段处理）"}), 409
                 if block.height != self.chain.height + 1:
                     return jsonify({"ok": False, "error": "高度不连续，请先同步"}), 409
+
                 prev = self.chain.head
                 expected_d = self.chain.next_difficulty()
                 ok, msg = verify_block(block, prev, expected_d, chain_state=self.chain)
@@ -127,7 +148,7 @@ class Node:
                     return jsonify({"ok": False, "error": msg}), 400
                 self.chain.append(block)
                 if self.verbose:
-                    print(f"[node] 收到并接受新区块 #{block.height}")
+                    print(f"[node] 收到并接受新区块 #{block.height} (slot {block.slot})")
                 self._broadcast("/block", data, exclude=request.remote_addr)
                 return jsonify({"ok": True, "height": block.height})
             except Exception as e:
@@ -185,13 +206,28 @@ class Node:
         return None
 
     def _sync_from_peer(self, url: str, peer_info: dict) -> int:
-        """从 peer 同步缺失的区块。返回拉取并接受的区块数。"""
+        """从 peer 同步缺失的区块（含 reorg）。返回应用的区块净增量。
+
+        Issue 3 修复：当 peer 链更长，但与我们在某高度分叉时，找共同祖先 → 回滚 → 重放 peer 链。
+        """
         peer_h = peer_info.get("height", -1)
         if peer_h <= self.chain.height:
             return 0
-        # 拉一段
-        start = self.chain.height + 1
-        end = min(peer_h, start + 99)   # 一次最多 100 块
+
+        # 1. 找共同祖先：比对 peer 在 [my_height, my_height-100] 的 hash
+        common_h = self._find_common_ancestor(url, peer_h)
+        if common_h is None:
+            if self.verbose:
+                print(f"[node] 无法与 {url} 找到共同祖先，跳过")
+            return 0
+        if common_h < self.chain.height:
+            removed = self.chain.rewind_to(common_h)
+            if self.verbose:
+                print(f"[node] reorg：回滚 {removed} 块到共同祖先 #{common_h}，从 {url} 取更长的链")
+
+        # 2. 从 common_h+1 拉到 peer_h
+        start = common_h + 1
+        end = min(peer_h, start + 99)
         try:
             r = requests.get(f"{url}/blocks/range/{start}/{end}",
                              timeout=PEER_TIMEOUT_SEC * 4,
@@ -208,7 +244,7 @@ class Node:
                     expected_d = self.chain.next_difficulty()
                     ok, msg = verify_block(block, prev, expected_d,
                                            chain_state=self.chain,
-                                           recompute_xeb=False)  # 同步时不重算 XEB（性能）
+                                           recompute_xeb=False)
                     if not ok:
                         if self.verbose:
                             print(f"[node] 拒绝来自 {url} 的区块 #{block.height}：{msg}")
@@ -220,10 +256,32 @@ class Node:
                         print(f"[node] 同步异常：{e}")
                     break
             if count > 0 and self.verbose:
-                print(f"[node] 从 {url} 同步了 {count} 块（高度 {start}–{start+count-1}）")
+                print(f"[node] 从 {url} 同步了 {count} 块")
             return count
         except Exception:
             return 0
+
+    def _find_common_ancestor(self, peer_url: str, peer_height: int) -> Optional[int]:
+        """找本节点与 peer 的最高共同祖先高度。"""
+        # 简单策略：从 min(my_h, peer_h) 向下查 peer 的 block_hash，直到与我的匹配
+        check_h = min(self.chain.height, peer_height)
+        # 只回溯到 max(0, my_height - 100)
+        bound = max(0, self.chain.height - 100)
+        while check_h >= bound:
+            try:
+                r = requests.get(f"{peer_url}/blocks/{check_h}",
+                                 timeout=PEER_TIMEOUT_SEC,
+                                 headers={"User-Agent": USER_AGENT})
+                if r.status_code != 200:
+                    return None
+                peer_hash = r.json().get("block_hash", "")
+                my_hash = "0x" + self.chain.get(check_h).block_hash().hex()
+                if peer_hash == my_hash:
+                    return check_h
+            except Exception:
+                return None
+            check_h -= 1
+        return 0   # 至少创世共同（兜底）
 
     def _sync_loop(self):
         if self.verbose:

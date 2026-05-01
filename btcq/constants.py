@@ -14,35 +14,59 @@ TOTAL_SUPPLY           = 21_000_000 * COIN # 总量上限：21,000,000 BTCQ
 INITIAL_BLOCK_REWARD   = 50 * COIN         # 创世后第 1 块奖励：50 BTCQ
 HALVING_INTERVAL       = 210_000           # 每 210,000 块减半一次（≈ 4 年）
 
-# === 出块节奏（参照 Bitcoin，但前期有 bootstrap 加速） ===
-TARGET_BLOCK_TIME_FINAL    = 600           # 最终稳态：10 分钟/块
-TARGET_BLOCK_TIME_BOOTSTRAP= 60            # 启动期：1 分钟/块
-BOOTSTRAP_FAST_DURATION    = 15 * 86400    # 头 15 天保持 60 秒/块
-BOOTSTRAP_RAMP_DURATION    = 30 * 86400    # 之后 30 天线性升到 600 秒/块
-BOOTSTRAP_TOTAL_DURATION   = BOOTSTRAP_FAST_DURATION + BOOTSTRAP_RAMP_DURATION
+# === 出块节奏：硬时间 slot（Ethereum 式） ===
+# Slot 是协议级"出块时机"概念：
+#   每个 slot 对应一个固定的 wall-clock 窗口（bootstrap 60s / 稳态 600s）
+#   每个 slot 唯一一个 proposer（VRF 选举）
+#   该 proposer 在 slot 期间提交合法区块 → 成功；否则 slot 空，下一个 slot 别人
+#   block.height 与 slot 解耦：高度只在出块成功时才递增，空 slot 不计高度
+# 这从根本上消除：① 多个 staker 抢同一 height ② 单 staker 刷 XEB ③ 链卡死
+SLOT_DURATION_BOOTSTRAP    = 60            # 启动期：60 秒一个 slot
+SLOT_DURATION_FINAL        = 600           # 稳态：10 分钟一个 slot（同 BTC 出块时间）
+BOOTSTRAP_DURATION         = 45 * 86400    # 创世后 45 天 bootstrap 期（之后转稳态）
+SLOT_FUTURE_TOL            = 2             # 允许 ±2 slot 时钟漂移（节点间时钟有偏差）
+SLOT_TIMESTAMP_TOL         = 600           # 允许时间戳 ±600 秒漂移（很宽松，留足空 slot + 慢链）
+                                           # 关键不变量：block.slot > prev.slot 严格递增
 
-DIFFICULTY_WINDOW      = 144               # bootstrap 期 144 块（约 2.4 小时@60s）调整一次
-DIFFICULTY_WINDOW_FINAL= 2016              # 稳态后回到 BTC 的 2016 块（≈2 周）
-DIFFICULTY_MIN_FACTOR  = 0.25              # 单次最多减为原来的 1/4
-DIFFICULTY_MAX_FACTOR  = 4.0               # 单次最多增加 4 倍
+DIFFICULTY_MIN_FACTOR  = 0.25
+DIFFICULTY_MAX_FACTOR  = 4.0
 DIFFICULTY_MIN         = 0.01
 DIFFICULTY_MAX         = 0.95
+DIFFICULTY_WINDOW_SLOTS= 144               # 每 144 个 slot 调整一次（不论是否被填）
 
 
+def slot_duration_at(seconds_since_genesis: int) -> int:
+    """给定从创世以来的秒数，返回当前 slot 时长（秒）。"""
+    if seconds_since_genesis < BOOTSTRAP_DURATION:
+        return SLOT_DURATION_BOOTSTRAP
+    return SLOT_DURATION_FINAL
+
+
+def slot_at(timestamp: int) -> int:
+    """给定 wall-clock 时间戳，返回 slot 编号（从 0 开始单调递增）。"""
+    secs = max(0, timestamp - GENESIS_TIMESTAMP)
+    if secs < BOOTSTRAP_DURATION:
+        return secs // SLOT_DURATION_BOOTSTRAP
+    bootstrap_slots = BOOTSTRAP_DURATION // SLOT_DURATION_BOOTSTRAP
+    return bootstrap_slots + (secs - BOOTSTRAP_DURATION) // SLOT_DURATION_FINAL
+
+
+def slot_start_timestamp(slot: int) -> int:
+    """给定 slot 编号，返回该 slot 开始的 wall-clock 时间戳。"""
+    bootstrap_slots = BOOTSTRAP_DURATION // SLOT_DURATION_BOOTSTRAP
+    if slot < bootstrap_slots:
+        return GENESIS_TIMESTAMP + slot * SLOT_DURATION_BOOTSTRAP
+    extra = slot - bootstrap_slots
+    return GENESIS_TIMESTAMP + BOOTSTRAP_DURATION + extra * SLOT_DURATION_FINAL
+
+
+# 兼容旧名字：保留 target_block_time_at 但等价于 slot_duration_at
 def target_block_time_at(seconds_since_genesis: int) -> float:
-    if seconds_since_genesis < BOOTSTRAP_FAST_DURATION:
-        return float(TARGET_BLOCK_TIME_BOOTSTRAP)
-    if seconds_since_genesis < BOOTSTRAP_TOTAL_DURATION:
-        elapsed = seconds_since_genesis - BOOTSTRAP_FAST_DURATION
-        progress = elapsed / BOOTSTRAP_RAMP_DURATION
-        return TARGET_BLOCK_TIME_BOOTSTRAP + (TARGET_BLOCK_TIME_FINAL - TARGET_BLOCK_TIME_BOOTSTRAP) * progress
-    return float(TARGET_BLOCK_TIME_FINAL)
+    return float(slot_duration_at(seconds_since_genesis))
 
 
 def difficulty_window_at(seconds_since_genesis: int) -> int:
-    if seconds_since_genesis < BOOTSTRAP_TOTAL_DURATION:
-        return DIFFICULTY_WINDOW
-    return DIFFICULTY_WINDOW_FINAL
+    return DIFFICULTY_WINDOW_SLOTS
 
 
 # === 共识：PoQ-Stake (Proof-of-Quantumness Stake) ===

@@ -44,20 +44,20 @@ def _f64(x: float) -> bytes:
 class Block:
     version: int
     height: int
+    slot: int                     # v0.1.2+: 硬时间 slot 编号（决定 proposer 选举）
     prev_hash: bytes              # 32
     timestamp: int
-    proposer_address: bytes          # 20
+    proposer_address: bytes       # 20
     n_qubits: int
     depth: int
     n_samples: int
     difficulty: float
-    nonce: int
     samples_root: bytes           # 32
     xeb_score: float
-    samples: List[int]            # 比特串以 int 表示，长度 = n_samples
+    samples: List[int]
     transactions: List[Transaction] = field(default_factory=list)
-    transactions_root: bytes = b"\x00" * 32   # Merkle 根，无交易时为 0
-    proposer_signature: bytes = b""  # 65, 由矿工签名后填入
+    transactions_root: bytes = b"\x00" * 32
+    proposer_signature: bytes = b""  # 65
 
     # ===== 序列化 =====
     def header_bytes(self) -> bytes:
@@ -65,6 +65,7 @@ class Block:
         parts = [
             _u(self.version, 2),
             _u(self.height, 8),
+            _u(self.slot, 8),
             self.prev_hash,
             _u(self.timestamp, 8),
             self.proposer_address,
@@ -72,7 +73,6 @@ class Block:
             _u(self.depth, 1),
             _u(self.n_samples, 4),
             _f64(self.difficulty),
-            _u(self.nonce, 8),
             self.samples_root,
             _f64(self.xeb_score),
             self.transactions_root,
@@ -88,20 +88,20 @@ class Block:
         return {
             "version":          self.version,
             "height":           self.height,
+            "slot":             self.slot,
             "prev_hash":        "0x" + self.prev_hash.hex(),
             "timestamp":        self.timestamp,
-            "proposer_address":    "0x" + self.proposer_address.hex(),
+            "proposer_address": "0x" + self.proposer_address.hex(),
             "n_qubits":         self.n_qubits,
-            "depth":            self.depth,
+            "depth":             self.depth,
             "n_samples":        self.n_samples,
             "difficulty":       self.difficulty,
-            "nonce":             self.nonce,
             "samples_root":     "0x" + self.samples_root.hex(),
             "xeb_score":        self.xeb_score,
             "samples":          [int(x) for x in self.samples],
             "transactions":     [t.to_dict() for t in self.transactions],
             "transactions_root":"0x" + self.transactions_root.hex(),
-            "proposer_signature":  "0x" + self.proposer_signature.hex(),
+            "proposer_signature":"0x" + self.proposer_signature.hex(),
             "block_hash":       "0x" + self.block_hash().hex(),
             "reward":           block_reward(self.height),
         }
@@ -114,6 +114,7 @@ class Block:
         return Block(
             version       = d["version"],
             height        = d["height"],
+            slot          = d.get("slot", 0),
             prev_hash     = hx(d["prev_hash"]),
             timestamp     = d["timestamp"],
             proposer_address = hx(d["proposer_address"]),
@@ -121,7 +122,6 @@ class Block:
             depth         = d["depth"],
             n_samples     = d["n_samples"],
             difficulty    = d["difficulty"],
-            nonce         = d["nonce"],
             samples_root  = hx(d["samples_root"]),
             xeb_score     = d["xeb_score"],
             samples       = list(d["samples"]),

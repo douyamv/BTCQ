@@ -20,6 +20,7 @@ import numpy as np
 from .constants import (
     PROTOCOL_VERSION, CIRCUIT_N_QUBITS, CIRCUIT_DEPTH, CIRCUIT_N_SAMPLES,
     MIN_STAKE, BOOTSTRAP_OPEN_BLOCKS, BOOTSTRAP_PER_ADDR_CAP,
+    slot_at, slot_start_timestamp, slot_duration_at, GENESIS_TIMESTAMP,
 )
 from .circuit import build_circuit_description, to_qiskit, simulate_statevector, amplitudes_for_samples
 from .xeb import linear_xeb, linear_xeb_from_probs
@@ -28,14 +29,15 @@ from .chain import Chain
 from .wallet import Wallet, keccak256
 from .mempool import Mempool
 from .transaction import Transaction
-from .stake import STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE, select_proposer
+from .stake import STAKE_VAULT, TX_TRANSFER, TX_STAKE, TX_UNSTAKE, select_proposer_for_slot
 
 
-def _circuit_seed(prev_hash: bytes, height: int, proposer_addr: bytes) -> bytes:
-    """PoQ-Stake 下，每个高度的电路 seed 由 prev_hash + height + proposer 决定。
-    出块人没有调 nonce 的自由——他只能"做或不做"，做了就必须达 XEB 阈值。
+def _circuit_seed(prev_hash: bytes, slot: int, proposer_addr: bytes) -> bytes:
+    """每个 slot 的电路 seed = keccak(prev_hash || slot || proposer)。
+
+    用 slot 而非 height：保证空 slot 也产生不同电路，proposer 没有"换 height 重试"自由。
     """
-    return keccak256(prev_hash + height.to_bytes(8, "big") + proposer_addr)
+    return keccak256(prev_hash + slot.to_bytes(8, "big") + proposer_addr)
 
 
 def _samples_from_counts(counts: dict, n_qubits: int, n_samples: int) -> List[int]:
@@ -52,42 +54,67 @@ def _samples_from_counts(counts: dict, n_qubits: int, n_samples: int) -> List[in
     return expanded
 
 
-def _check_eligible(chain: Chain, wallet: Wallet, verbose: bool):
-    """出块前检查共识资格。bootstrap 期 vs PoQ-Stake 期不同规则。"""
-    next_height = chain.height + 1
-    addr = wallet.address_bytes
+def _check_eligible(chain: Chain, wallet: Wallet, verbose: bool) -> int:
+    """检查 wall-clock 当前 slot 我是否能出块。返回该 slot 编号供调用方使用。
 
-    if next_height <= BOOTSTRAP_OPEN_BLOCKS:
-        # bootstrap：开放挖矿，但单地址有出块上限（防垄断）
+    bootstrap 期（前 BOOTSTRAP_OPEN_BLOCKS 块）：开放挖矿 + 每地址有上限
+    PoQ-Stake 期：必须是 VRF 选中的 slot proposer
+    """
+    addr = wallet.address_bytes
+    now_ts = int(time.time())
+    cur_slot = slot_at(now_ts)
+    head = chain.head
+    head_slot = head.slot if head else 0
+
+    # slot 必须严格递增
+    if cur_slot <= head_slot:
+        wait_until = slot_start_timestamp(head_slot + 1)
+        raise RuntimeError(
+            f"当前 slot {cur_slot} ≤ 上一区块 slot {head_slot}，需等 {wait_until-now_ts}s "
+            f"到下个 slot 才能出块"
+        )
+
+    if chain.height + 1 <= BOOTSTRAP_OPEN_BLOCKS:
+        # bootstrap：单地址出块上限
         mined = chain.bootstrap_blocks_by(addr)
         if mined >= BOOTSTRAP_PER_ADDR_CAP:
             raise RuntimeError(
-                f"bootstrap 期：地址 {wallet.address_hex()} 已挖 {mined} 块，"
-                f"达到 {BOOTSTRAP_PER_ADDR_CAP} 上限。等正式 PoQ-Stake 期再出块（先抵押）。"
+                f"bootstrap：地址 {wallet.address_hex()} 已挖 {mined} 块，达到 "
+                f"{BOOTSTRAP_PER_ADDR_CAP} 上限。等转入 PoQ-Stake 后再挖（先抵押）。"
             )
         if verbose:
-            print(f"[propose] bootstrap 第 {next_height}/{BOOTSTRAP_OPEN_BLOCKS} 块（你已挖 {mined}/{BOOTSTRAP_PER_ADDR_CAP}）")
-        return
+            print(f"[propose] bootstrap slot {cur_slot}（高度 {chain.height+1}/{BOOTSTRAP_OPEN_BLOCKS}，"
+                  f"你已挖 {mined}/{BOOTSTRAP_PER_ADDR_CAP}）")
+        return cur_slot
 
-    # PoQ-Stake 期：必须有抵押 + 是 VRF 选中的出块人
+    # PoQ-Stake 期
     s = chain.staked_of(addr)
     if s < MIN_STAKE:
         raise RuntimeError(
-            f"PoQ-Stake：地址 {wallet.address_hex()} 抵押 {s/10**8:.4f} BTCQ < 最低 "
-            f"{MIN_STAKE/10**8:.4f} BTCQ。先用 scripts/stake.py 抵押。"
+            f"抵押 {s/10**8:.4f} BTCQ < 最低 {MIN_STAKE/10**8:.4f} BTCQ。先用 scripts/stake.py 抵押。"
         )
     stake_map = chain.stake_map()
-    head = chain.head
-    expected = select_proposer(head.block_hash(), next_height, stake_map)
+    expected = select_proposer_for_slot(cur_slot, stake_map)
     if expected is None:
-        raise RuntimeError("PoQ-Stake：全网无合格 staker，应该不会发生")
+        raise RuntimeError("全网无合格 staker（不应发生）")
     if expected != addr:
+        next_my_slot = _next_my_slot(cur_slot, addr, stake_map)
+        wait = slot_start_timestamp(next_my_slot) - now_ts if next_my_slot else None
         raise RuntimeError(
-            f"本 slot (高度 {next_height}) 选中的是 0x{expected.hex()}，不是你（0x{addr.hex()}）。"
-            f"等下一个 slot。"
+            f"slot {cur_slot} 选中的是 0x{expected.hex()}，不是你。"
+            + (f" 你下一个 slot 估计是 {next_my_slot}（约 {wait}s 后）。" if next_my_slot else "")
         )
     if verbose:
-        print(f"[propose] ✓ PoQ-Stake：你被 VRF 选中，抵押 {s/10**8:.4f} BTCQ")
+        print(f"[propose] ✓ slot {cur_slot}: 你被 VRF 选中（抵押 {s/10**8:.4f} BTCQ）")
+    return cur_slot
+
+
+def _next_my_slot(cur_slot: int, addr: bytes, stake_map: dict, lookahead: int = 200) -> int | None:
+    """前瞻 lookahead 个 slot，返回下一个属于我的 slot 编号；找不到返回 None。"""
+    for s in range(cur_slot + 1, cur_slot + 1 + lookahead):
+        if select_proposer_for_slot(s, stake_map) == addr:
+            return s
+    return None
 
 
 def propose_classical_simulator(
@@ -104,16 +131,15 @@ def propose_classical_simulator(
     chain = Chain(chain_dir)
     head = chain.head
     assert head is not None
-    if not skip_stake_check:
-        _check_eligible(chain, wallet, verbose)
+    cur_slot = _check_eligible(chain, wallet, verbose) if not skip_stake_check else slot_at(int(time.time()))
     prev_hash = head.block_hash()
     height = head.height + 1
     difficulty = chain.next_difficulty()
     if verbose:
-        print(f"[propose] head={head.height} -> {height}, prev={prev_hash.hex()[:16]}...")
+        print(f"[propose] head={head.height}, slot {cur_slot}, prev={prev_hash.hex()[:16]}...")
         print(f"[propose] difficulty target = {difficulty:.4f}")
 
-    seed = _circuit_seed(prev_hash, height, wallet.address_bytes)
+    seed = _circuit_seed(prev_hash, cur_slot, wallet.address_bytes)
     desc = build_circuit_description(seed, n_qubits, depth)
     state = simulate_statevector(desc)
     rng = np.random.default_rng(int.from_bytes(os.urandom(8), "big"))
@@ -125,7 +151,7 @@ def propose_classical_simulator(
         print(f"[propose] simulator XEB = {f_xeb:.4f} (need ≥ {difficulty:.4f})")
     if f_xeb < difficulty:
         raise RuntimeError(f"模拟 XEB={f_xeb:.4f} 未达阈值，难度过高？")
-    return _finalize_block(chain, wallet, prev_hash, head, height,
+    return _finalize_block(chain, wallet, prev_hash, head, height, cur_slot,
                             n_qubits, depth, n_samples, samples, f_xeb,
                             difficulty, verbose, mempool=mempool)
 
@@ -148,8 +174,7 @@ def propose_ibm_quantum(
     chain = Chain(chain_dir)
     head = chain.head
     assert head is not None
-    if not skip_stake_check:
-        _check_eligible(chain, wallet, verbose)
+    cur_slot = _check_eligible(chain, wallet, verbose) if not skip_stake_check else slot_at(int(time.time()))
     prev_hash = head.block_hash()
     height = head.height + 1
     difficulty = chain.next_difficulty()
@@ -160,9 +185,9 @@ def propose_ibm_quantum(
     backend = svc.backend(backend_name)
     if verbose:
         print(f"[propose] backend ready, queue={backend.status().pending_jobs}")
-        print(f"[propose] difficulty target = {difficulty:.4f}")
+        print(f"[propose] slot {cur_slot}, difficulty target = {difficulty:.4f}")
 
-    seed = _circuit_seed(prev_hash, height, wallet.address_bytes)
+    seed = _circuit_seed(prev_hash, cur_slot, wallet.address_bytes)
     desc = build_circuit_description(seed, n_qubits, depth)
     qc = to_qiskit(desc, measure=True)
 
@@ -197,7 +222,7 @@ def propose_ibm_quantum(
         print(f"  XEB = {f_xeb:.4f}  (need ≥ {difficulty:.4f})  [verify {verify_time:.1f}s]")
     if f_xeb < difficulty:
         raise RuntimeError(f"量子证明 XEB={f_xeb:.4f} 未达阈值，硬件保真度问题？")
-    return _finalize_block(chain, wallet, prev_hash, head, height,
+    return _finalize_block(chain, wallet, prev_hash, head, height, cur_slot,
                             n_qubits, depth, shots, samples, f_xeb,
                             difficulty, verbose, mempool=mempool)
 
@@ -251,7 +276,7 @@ def _select_valid_transactions(chain: Chain, mempool: Optional[Mempool],
     return selected
 
 
-def _finalize_block(chain, wallet, prev_hash, head, height, n_qubits, depth,
+def _finalize_block(chain, wallet, prev_hash, head, height, slot, n_qubits, depth,
                     n_samples, samples, f_xeb, difficulty, verbose,
                     mempool: Optional[Mempool] = None):
     samples_root = compute_samples_root(samples, n_qubits)
@@ -260,6 +285,7 @@ def _finalize_block(chain, wallet, prev_hash, head, height, n_qubits, depth,
     block = Block(
         version           = PROTOCOL_VERSION,
         height            = height,
+        slot              = slot,
         prev_hash         = prev_hash,
         timestamp         = int(time.time()),
         proposer_address  = wallet.address_bytes,
@@ -267,7 +293,6 @@ def _finalize_block(chain, wallet, prev_hash, head, height, n_qubits, depth,
         depth             = depth,
         n_samples         = n_samples,
         difficulty        = difficulty,
-        nonce             = 0,         # PoQ-Stake 下 nonce 不再由出块人选择
         samples_root      = samples_root,
         xeb_score         = f_xeb,
         samples           = samples,
@@ -281,7 +306,7 @@ def _finalize_block(chain, wallet, prev_hash, head, height, n_qubits, depth,
     if verbose:
         from .block import block_reward
         print(f"\n✅ 区块出块成功！")
-        print(f"   高度:    {block.height}")
+        print(f"   高度:    {block.height}    slot: {block.slot}")
         print(f"   哈希:    0x{block.block_hash().hex()}")
         print(f"   出块人:  {wallet.address_hex()}")
         print(f"   XEB:     {f_xeb:.4f}")
