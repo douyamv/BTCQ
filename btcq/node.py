@@ -162,6 +162,28 @@ class Node:
                 "total_slashed": self.chain.total_slashed(),
             })
 
+        @a.get("/address/<addr>")
+        def get_address(addr):
+            """查询地址的余额、抵押、冷却、nonce、出块奖励等。"""
+            from .constants import MIN_STAKE
+            try:
+                hex_str = addr[2:] if addr.startswith('0x') else addr
+                addr_bytes = bytes.fromhex(hex_str)
+                if len(addr_bytes) != 20:
+                    return jsonify({"error": "地址必须 20 字节"}), 400
+            except Exception:
+                return jsonify({"error": "地址格式错误"}), 400
+            return jsonify({
+                "address":      "0x" + addr_bytes.hex(),
+                "liquid":       self.chain.balance_of(addr_bytes),
+                "staked":       self.chain.staked_of(addr_bytes),
+                "cooling":      self.chain.cooling_of(addr_bytes),
+                "total":        self.chain.total_balance_of(addr_bytes),
+                "nonce":        self.chain.nonce_of(addr_bytes),
+                "eligible":     self.chain.staked_of(addr_bytes) >= MIN_STAKE,
+                "bootstrap_blocks": self.chain.bootstrap_blocks_by(addr_bytes),
+            })
+
         @a.get("/blocks/<int:h>")
         def get_block(h):
             if h < 0 or h > self.chain.height:
